@@ -19,6 +19,7 @@ from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
 from indexer import get_author, get_title, SUPPORTED, is_excluded
+from archive_extractor import is_archive
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,6 +90,16 @@ def run_worker(batch_size: int = BATCH):
         from pathlib import Path
         if is_excluded(Path(filepath).name):
             logging.debug(f"[SKIP] Fichier temporaire ignoré : {filepath}")
+            continue
+        if is_archive(Path(filepath)):
+            # L'extraction récursive d'archives n'est implémentée que dans
+            # indexer.py/watcher.py (appel direct index_file/index_archive).
+            # Ce worker Kafka ne gère pas encore ce cas — à étendre si un
+            # producteur Kafka est un jour branché sur ce topic.
+            logging.warning(
+                f"[SKIP] Archive non traitée par ce worker : {filepath} "
+                f"(utiliser indexer.py ou watcher.py pour les archives)"
+            )
             continue
         if extension not in SUPPORTED:
             continue

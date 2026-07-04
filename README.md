@@ -22,8 +22,38 @@ app/
 ├── worker.py           # Workers Kafka — indexation continue
 ├── watcher.py           # Surveillance temps réel (PollingObserver)
 ├── acl_extractor.py     # Extraction ACL POSIX + getfacl
+├── archive_extractor.py # Extraction sécurisée d'archives (zip, tar.*, 7z)
 └── pst_extractor.py     # Indexation des emails PST (Outlook)
 ```
+
+## Archives supportées
+
+Le contenu des archives est indexé automatiquement — chaque fichier
+supporté à l'intérieur devient un document, avec les **ACL héritées de
+l'archive elle-même** (comme pour les emails d'un fichier PST) :
+
+| Format | Dépendance |
+|---|---|
+| `.zip` | Bibliothèque standard (`zipfile`) |
+| `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz`/`.txz` | Bibliothèque standard (`tarfile`) |
+| `.7z` | `py7zr` (inclus dans `requirements.txt`) |
+
+Le document indexé porte l'identité `chemin/archive.zip::dossier/fichier.pdf`
+dans son champ `filepath` — il n'existe pas de fichier disque réel à cette
+adresse (extraction dans un dossier temporaire, nettoyé après indexation).
+L'aperçu (`/api/preview`) n'est donc pas disponible pour ces documents,
+seule la recherche l'est.
+
+**Sécurité** — protection contre les archives malveillantes :
+- **Zip slip** : chemins `../../` dans l'archive détectés et bloqués
+- **Zip bomb** : limites configurables sur le nombre de fichiers
+  (`ARCHIVE_MAX_FILES`, défaut 5000) et la taille décompressée totale
+  (`ARCHIVE_MAX_TOTAL_SIZE_MB`, défaut 1000 Mo)
+- **Archives imbriquées** : profondeur limitée par `ARCHIVE_MAX_DEPTH`
+  (défaut 1 — une archive dans une archive, pas plus)
+
+La suppression d'une archive supprime automatiquement tous ses membres
+de l'index (recherche par préfixe sur le champ `filepath`).
 
 ## Dépendances externes (fournies par docsearch-infra)
 

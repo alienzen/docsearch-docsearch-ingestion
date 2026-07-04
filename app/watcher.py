@@ -16,6 +16,7 @@ from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
 from indexer import index_file, SUPPORTED, is_excluded
+from archive_extractor import is_archive
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +42,12 @@ def delete_from_index(filepath: str):
     Supprime un document de l'index par son ID (hash du chemin normalisé).
     Plus fiable que delete_by_query : pas de problème de chemin relatif/absolu,
     et fonctionne même si le fichier est déjà supprimé du disque.
+
+    Cas particulier des archives (.zip, .tar.*, .7z) : elles ne sont
+    jamais indexées en tant que document unique — seuls leurs membres
+    le sont, avec une identité "archive::chemin/interne". Une recherche
+    par wildcard sur ce préfixe supprime donc tous les documents issus
+    de l'archive supprimée.
     """
     normalized = str(Path(filepath).resolve())
     doc_id     = hashlib.md5(normalized.encode()).hexdigest()
@@ -48,11 +55,22 @@ def delete_from_index(filepath: str):
         es.delete(index="documents", id=doc_id, refresh=True)
         logging.info(f"🗑️  Supprimé de l'index : {normalized}")
     except Exception as e:
-        # 404 = document pas dans l'index (déjà supprimé ou jamais indexé)
         if "NotFoundError" in type(e).__name__ or "404" in str(e):
-            logging.warning(f"⚠️  Document introuvable dans l'index : {normalized}")
+            logging.debug(f"Document seul introuvable (normal pour une archive) : {normalized}")
         else:
             logging.error(f"Erreur suppression ({normalized}) : {e}")
+
+    if is_archive(Path(filepath)):
+        try:
+            res = es.delete_by_query(
+                index="documents",
+                query={"wildcard": {"filepath": f"{normalized}::*"}},
+                refresh=True,
+            )
+            n = res.get("deleted", 0)
+            logging.info(f"🗑️  {n} membre(s) d'archive supprimé(s) de l'index : {normalized}")
+        except Exception as e:
+            logging.error(f"Erreur suppression des membres d'archive ({normalized}) : {e}")
 
 
 def update_acl_only(filepath: str):
@@ -96,7 +114,8 @@ def get_indexed_acl(filepath: str) -> dict | None:
 class DocumentHandler(FileSystemEventHandler):
 
     def _is_supported(self, path):
-        return Path(path).suffix.lower() in SUPPORTED
+        p = Path(path)
+        return p.suffix.lower() in SUPPORTED or is_archive(p)
 
     def _is_temp(self, path):
         # is_excluded (indexer.py) exclut tout fichier commençant par
@@ -115,6 +134,15 @@ class DocumentHandler(FileSystemEventHandler):
         if event.is_directory or not self._is_supported(event.src_path) or self._is_temp(event.src_path):
             return
         logging.info(f"✏️  Fichier modifié : {event.src_path}")
+
+        # Les archives ne sont jamais indexées comme document unique
+        # (seuls leurs membres le sont) — pas de diff ACL possible sur
+        # un doc qui n'existe pas : on supprime tous ses membres puis
+        # on réextrait/réindexe systématiquement.
+        if is_archive(Path(event.src_path)):
+            delete_from_index(event.src_path)
+            self._safe_index(event.src_path)
+            return
 
         # Vérifier si seules les ACL ont changé
         old_acl = get_indexed_acl(event.src_path)

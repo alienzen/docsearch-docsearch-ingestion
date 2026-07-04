@@ -11,9 +11,13 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
+import tempfile
 from tika import parser as tika_parser
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl
+from archive_extractor import (
+    is_archive, safe_extract_archive, ArchiveExtractionError, ARCHIVE_MAX_DEPTH
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +36,9 @@ es = Elasticsearch(
 
 SUPPORTED = {".doc", ".docx", ".ppt", ".pptx",
              ".xls", ".xlsx", ".txt", ".pdf", ".pst"}
+
+# Archives dont le contenu est indexé (voir archive_extractor.py) :
+# .zip, .tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .7z (si py7zr installé)
 
 
 def create_index():
@@ -122,10 +129,16 @@ def get_title(metadata: dict, fallback: str) -> str:
     return metadata.get("dc:title") or metadata.get("office:title") or fallback
 
 
-def file_hash(filepath: str) -> str:
-    """Hash du chemin normalisé — reproductible même après suppression."""
-    normalized = str(Path(filepath).resolve())
-    return hashlib.md5(normalized.encode()).hexdigest()
+def file_hash(identity: str) -> str:
+    """
+    Hash de l'identité du document — reproductible même après suppression
+    du fichier. `identity` doit déjà être normalisée par l'appelant :
+    - fichier normal   : str(Path(filepath).resolve())
+    - membre d'archive : "archive_resolue::chemin/dans/larchive"
+    (ne PAS appeler Path().resolve() ici : une identité d'archive n'est
+    pas un chemin disque réel et resolve() y perdrait son sens).
+    """
+    return hashlib.md5(identity.encode()).hexdigest()
 
 
 def is_excluded(filename: str) -> bool:
@@ -139,37 +152,38 @@ def is_excluded(filename: str) -> bool:
     return filename.startswith("~") or filename.startswith(".~")
 
 
-def index_file(filepath: str):
-    path = Path(filepath)
-    if is_excluded(path.name):
-        logging.debug(f"  [IGNORÉ] {path.name} (fichier temporaire)")
-        return
-    if path.suffix.lower() not in SUPPORTED:
-        return
+def _index_document(tika_path: Path, identity: str, filename: str,
+                     extension: str, acl, size: int, doc_type: str = "document"):
+    """
+    Extrait le contenu (Tika) et indexe un document dans ES.
 
-    doc_id = file_hash(filepath)
+    `identity` est la chaîne utilisée pour calculer doc_id et pour le
+    champ `filepath` — c'est un vrai chemin disque pour un fichier
+    normal, ou "archive.zip::dossier/fichier.pdf" pour un membre
+    d'archive (qui n'a pas de chemin disque stable, le fichier n'existe
+    que dans un dossier temporaire pendant l'extraction).
+    `tika_path` est le chemin RÉEL sur disque à donner à Tika pour
+    extraire le contenu (peut différer de `identity`).
+    """
+    doc_id = file_hash(identity)
     if es.exists(index="documents", id=doc_id):
-        logging.info(f"  [SKIP] {path.name}")
+        logging.info(f"  [SKIP] {identity}")
         return
 
-    logging.info(f"  [INDEX] {path.name}")
-    content, metadata = extract_text(filepath)
-
-    # ── Extraction ACL ────────────────────────────
-    acl = extract_acl(filepath)
+    logging.info(f"  [INDEX] {identity}")
+    content, metadata = extract_text(str(tika_path))
 
     doc = {
-        "filename":   path.name,
-        "filepath":   str(Path(filepath).resolve()),
-        "extension":  path.suffix.lower(),
-        "type":       "document",
+        "filename":   filename,
+        "filepath":   identity,
+        "extension":  extension,
+        "type":       doc_type,
         "content":    content,
-        "title":      get_title(metadata, path.stem),
+        "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
-        "size":       path.stat().st_size,
+        "size":       size,
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "doc_hash":   doc_id,
-        # ── ACL indexées ─────────────────────────
         "acl": {
             "owner":       acl.owner,
             "group":       acl.group,
@@ -180,6 +194,88 @@ def index_file(filepath: str):
         },
     }
     es.index(index="documents", id=doc_id, document=doc)
+
+
+def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: int = 0):
+    """
+    Extrait une archive dans un dossier temporaire et indexe chaque
+    membre supporté. Les archives imbriquées sont traitées récursivement
+    jusqu'à ARCHIVE_MAX_DEPTH. Tous les membres héritent des ACL de
+    l'archive parente (comme pour les emails d'un fichier PST).
+    """
+    with tempfile.TemporaryDirectory(prefix="docsearch_archive_") as tmp:
+        tmp_path = Path(tmp)
+        try:
+            extracted = safe_extract_archive(archive_real_path, tmp_path)
+        except ArchiveExtractionError as e:
+            logging.warning(f"  [ARCHIVE IGNORÉE] {archive_real_path.name} : {e}")
+            return
+
+        for real_path, rel_member_path in extracted:
+            if is_excluded(real_path.name):
+                continue
+
+            identity = f"{identity_root}::{rel_member_path}"
+
+            if is_archive(real_path):
+                if depth < ARCHIVE_MAX_DEPTH:
+                    logging.info(f"  [ARCHIVE IMBRIQUÉE] {identity}")
+                    _process_archive(real_path, identity, acl, depth + 1)
+                else:
+                    logging.warning(
+                        f"  [PROFONDEUR MAX] Archive imbriquée ignorée : {identity}"
+                    )
+                continue
+
+            extension = real_path.suffix.lower()
+            if extension not in SUPPORTED:
+                continue
+
+            _index_document(
+                tika_path=real_path,
+                identity=identity,
+                filename=real_path.name,
+                extension=extension,
+                acl=acl,
+                size=real_path.stat().st_size,
+                doc_type="archive_member",
+            )
+
+
+def index_archive(filepath: str):
+    """Point d'entrée pour indexer le contenu d'une archive (.zip, .tar.*, .7z)."""
+    path = Path(filepath)
+    identity_root = str(path.resolve())
+    acl = extract_acl(filepath)   # héritée par tous les membres de l'archive
+    logging.info(f"📦 Ouverture archive : {path.name}")
+    _process_archive(path, identity_root, acl, depth=0)
+    logging.info(f"✅ Archive traitée : {path.name}")
+
+
+def index_file(filepath: str):
+    path = Path(filepath)
+    if is_excluded(path.name):
+        logging.debug(f"  [IGNORÉ] {path.name} (fichier temporaire)")
+        return
+
+    if is_archive(path):
+        index_archive(filepath)
+        return
+
+    if path.suffix.lower() not in SUPPORTED:
+        return
+
+    identity = str(path.resolve())
+    acl = extract_acl(filepath)
+    _index_document(
+        tika_path=path,
+        identity=identity,
+        filename=path.name,
+        extension=path.suffix.lower(),
+        acl=acl,
+        size=path.stat().st_size,
+        doc_type="document",
+    )
 
 
 def optimize_for_bulk():
