@@ -96,9 +96,34 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
 
 
 if __name__ == "__main__":
-    logging.info(f"📂 Scan de {DOCS_FOLDER}...")
+    import sys
+
+    # Argument optionnel : ne scanner qu'un sous-dossier de DOCS_FOLDER
+    # (chemin relatif à DOCS_FOLDER, ou chemin absolu sous DOCS_FOLDER).
+    #   python producer.py                    → scan complet
+    #   python producer.py finance            → /documents/finance uniquement
+    #   python producer.py /documents/finance → équivalent (absolu)
+    target_folder = DOCS_FOLDER
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        candidate = Path(arg) if os.path.isabs(arg) else Path(DOCS_FOLDER) / arg
+        candidate = candidate.resolve()
+        docs_root = Path(DOCS_FOLDER).resolve()
+
+        if docs_root != candidate and docs_root not in candidate.parents:
+            logging.error(
+                f"❌ '{candidate}' est en dehors de DOCS_FOLDER ({docs_root}) — abandon."
+            )
+            sys.exit(1)
+        if not candidate.is_dir():
+            logging.error(f"❌ Dossier introuvable : {candidate}")
+            sys.exit(1)
+
+        target_folder = str(candidate)
+
+    logging.info(f"📂 Scan de {target_folder}...")
     create_index()   # s'assure que le mapping ES existe avant tout traitement
-    published, skipped = scan_and_produce(DOCS_FOLDER)
+    published, skipped = scan_and_produce(target_folder)
     logging.info(
         f"✅ {published} fichier(s) publié(s) sur Kafka ({KAFKA_TOPIC}), "
         f"{skipped} ignoré(s). Les workers vont maintenant les traiter en parallèle."
