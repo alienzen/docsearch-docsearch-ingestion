@@ -1,0 +1,17 @@
+# ── docsearch-ingestion — dépendances Python ─────────────────
+# Indexation, workers Kafka, surveillance de dossier
+
+# Elasticsearch 9.x (requiert Python >= 3.10)
+elasticsearch==9.4.1
+
+# Client Tika (appelle les serveurs Tika distants via HTTP —
+# aucun JRE local nécessaire dans ce conteneur)
+tika==3.1.0
+
+# File de messages
+# kafka-python 2.0.2 casse sous Python 3.12 (ModuleNotFoundError:
+# kafka.vendor.six.moves) — kafka-python-ng est le fork maintenu.
+kafka-python-ng==2.2.3
+
+# Surveillance dossier (PollingObserver requis pour CIFS/NFS)
+watchdog==4.0.0
