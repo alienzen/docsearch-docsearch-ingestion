@@ -15,7 +15,7 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, SUPPORTED
+from indexer import index_file, SUPPORTED, is_excluded
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,8 +99,11 @@ class DocumentHandler(FileSystemEventHandler):
         return Path(path).suffix.lower() in SUPPORTED
 
     def _is_temp(self, path):
+        # is_excluded (indexer.py) exclut tout fichier commençant par
+        # "~" ou ".~" (verrous Word/LibreOffice). On garde en plus les
+        # patterns spécifiques à d'autres éditeurs (# Emacs, .tmp).
         name = Path(path).name
-        return name.startswith(("~$", ".~", "#")) or name.endswith(".tmp")
+        return is_excluded(name) or name.startswith("#") or name.endswith(".tmp")
 
     def on_created(self, event):
         if event.is_directory or not self._is_supported(event.src_path) or self._is_temp(event.src_path):

@@ -18,7 +18,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, SUPPORTED
+from indexer import get_author, get_title, SUPPORTED, is_excluded
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +86,10 @@ def run_worker(batch_size: int = BATCH):
 
     for message in consumer:
         item, filepath, extension = message.value, message.value["filepath"], message.value.get("extension", "")
+        from pathlib import Path
+        if is_excluded(Path(filepath).name):
+            logging.debug(f"[SKIP] Fichier temporaire ignoré : {filepath}")
+            continue
         if extension not in SUPPORTED:
             continue
         try:

@@ -128,8 +128,22 @@ def file_hash(filepath: str) -> str:
     return hashlib.md5(normalized.encode()).hexdigest()
 
 
+def is_excluded(filename: str) -> bool:
+    """
+    Fichiers à ignorer systématiquement : fichiers temporaires ou verrous
+    créés par les suites bureautiques (Word/LibreOffice) lors de l'édition.
+    ~$rapport.docx  → verrou Word
+    ~rapport.tmp    → fichier temporaire
+    .~lock.rapport# → verrou LibreOffice
+    """
+    return filename.startswith("~") or filename.startswith(".~")
+
+
 def index_file(filepath: str):
     path = Path(filepath)
+    if is_excluded(path.name):
+        logging.debug(f"  [IGNORÉ] {path.name} (fichier temporaire)")
+        return
     if path.suffix.lower() not in SUPPORTED:
         return
 
