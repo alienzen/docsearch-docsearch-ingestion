@@ -12,13 +12,14 @@ import json
 import random
 import hashlib
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 from kafka import KafkaConsumer
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, SUPPORTED, is_excluded
+from indexer import get_author, get_title, SUPPORTED, is_excluded, index_archive
 from archive_extractor import is_archive
 
 logging.basicConfig(
@@ -41,7 +42,6 @@ def extract(filepath: str) -> tuple[str, dict]:
 
 
 def build_action(filepath: str, content: str, metadata: dict, extension: str) -> dict:
-    from pathlib import Path
     path   = Path(filepath)
     doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
 
@@ -87,22 +87,27 @@ def run_worker(batch_size: int = BATCH):
 
     for message in consumer:
         item, filepath, extension = message.value, message.value["filepath"], message.value.get("extension", "")
-        from pathlib import Path
         if is_excluded(Path(filepath).name):
             logging.debug(f"[SKIP] Fichier temporaire ignoré : {filepath}")
             continue
         if is_archive(Path(filepath)):
-            # L'extraction récursive d'archives n'est implémentée que dans
-            # indexer.py/watcher.py (appel direct index_file/index_archive).
-            # Ce worker Kafka ne gère pas encore ce cas — à étendre si un
-            # producteur Kafka est un jour branché sur ce topic.
-            logging.warning(
-                f"[SKIP] Archive non traitée par ce worker : {filepath} "
-                f"(utiliser indexer.py ou watcher.py pour les archives)"
-            )
+            # Traité directement (extraction + indexation immédiate de
+            # chaque membre, pas de mise en buffer bulk() ici) : le
+            # fichier archive est sur le volume partagé /documents,
+            # accessible depuis n'importe quel worker.
+            try:
+                index_archive(filepath)
+            except Exception as e:
+                logging.error(f"Erreur archive [{filepath}] : {e}")
             continue
         if extension not in SUPPORTED:
             continue
+
+        doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
+        if es.exists(index="documents", id=doc_id):
+            logging.debug(f"[SKIP] Déjà indexé : {filepath}")
+            continue
+
         try:
             if extension == ".pst":
                 from pst_extractor import index_pst

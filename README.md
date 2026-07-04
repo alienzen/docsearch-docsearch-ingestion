@@ -84,18 +84,78 @@ de l'index (recherche par préfixe sur le champ `filepath`).
 — identique pour l'indexation et la suppression, y compris après que le
 fichier a été supprimé du disque.
 
+## Architecture d'indexation — producer / workers
+
+```
+producer.py                Kafka                  worker.py ×N (parallèle)
+──────────────    scan     ──────────    consume   ─────────────────────────
+Parcourt              →   documents-   →           Extraction Tika (I/O)
+DOCS_FOLDER,               to-index                + calcul ACL
+publie chaque               topic                  + indexation ES (bulk)
+référence de                (16 partitions)
+fichier (rapide,
+non bloquant)
+```
+
+`producer.py` remplace l'ancienne indexation séquentielle (un seul
+processus qui parcourt puis indexe fichier par fichier). Il se contente
+de lister les fichiers et de publier leur chemin sur Kafka — opération
+rapide qui ne dépend pas d'Elasticsearch ni de Tika.
+
+Le vrai travail (extraction Tika, qui est l'opération la plus lente,
+suivi de l'indexation ES) est fait par plusieurs **réplicas** du service
+`worker`, qui consomment le topic Kafka en parallèle. C'est ce qui donne
+un débit d'indexation élevé — la charge est distribuée sur N workers au
+lieu d'un seul processus séquentiel.
+
+### Augmenter le débit
+
+```bash
+# Depuis docsearch-infra :
+./manage.sh scale-workers 12   # 12 workers en parallèle (recommandé
+                                # pour de gros volumes en production)
+```
+
+**Le nombre de partitions du topic Kafka doit être ≥ au nombre de
+workers** — sinon certains workers ne recevront jamais de messages
+(le parallélisme d'un groupe de consumers Kafka est plafonné par le
+nombre de partitions). C'est réglé via `KAFKA_NUM_PARTITIONS` dans
+`docker-compose.yml` de `docsearch-infra` (16 par défaut).
+
+Les 4 instances Tika (`tika1`-`tika4`) sont choisies aléatoirement par
+chaque worker (`random.choice(TIKA_SERVERS)`) — elles absorbent la
+charge de plusieurs workers simultanés sans configuration supplémentaire.
+
+### Le watcher n'utilise pas ce pipeline
+
+`watcher.py` (surveillance temps réel) appelle `index_file()` de
+`indexer.py` **directement**, sans passer par Kafka — le volume de
+fichiers modifiés en continu est généralement trop faible pour
+justifier la complexité d'une file de messages. Le pipeline
+producer/workers est réservé aux gros volumes (indexation initiale,
+réindexation complète).
+
 ## Lancer en local (nécessite un ES + Kafka + Tika déjà démarrés)
 
 ```bash
 cp .env.example .env
 docker build -t docsearch-ingestion .
 
-# Indexation initiale (one-shot)
+# Indexation initiale — scan + publication Kafka (rapide, non bloquant)
 docker run --rm --env-file .env -v /chemin/documents:/documents:ro \
   --network docsearch-infra_docsearch-net \
-  docsearch-ingestion python indexer.py
+  docsearch-ingestion python producer.py
 
-# Watcher (démon)
+# Workers — plusieurs instances en parallèle pour un débit élevé
+# (le travail lourd — extraction Tika + indexation ES — se fait ici)
+docker run -d --env-file .env -v /chemin/documents:/documents:ro \
+  --network docsearch-infra_docsearch-net \
+  docsearch-ingestion python worker.py
+# → lancer plusieurs conteneurs de ce type pour paralléliser
+
+# Watcher (démon) — indexation temps réel, appelle index_file()
+# directement (pas via Kafka, volume trop faible pour justifier le
+# passage par une file de messages)
 docker run -d --env-file .env -v /chemin/documents:/documents:ro \
   --network docsearch-infra_docsearch-net \
   docsearch-ingestion python watcher.py
