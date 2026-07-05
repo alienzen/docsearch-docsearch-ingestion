@@ -111,6 +111,127 @@ def get_indexed_acl(filepath: str) -> dict | None:
         return None
 
 
+def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bool:
+    """
+    Copie un document déjà indexé vers une nouvelle identité (nouveau
+    chemin), SANS relancer Tika. Utilisé pour les renommages/déplacements
+    purs où le contenu du fichier n'a pas changé — l'extraction de
+    contenu (opération coûteuse) est déjà en base, seul le chemin change.
+
+    Retourne True si la copie a réussi (l'ancien document existait),
+    False sinon (l'appelant doit alors déclencher une réindexation
+    complète en repli).
+    """
+    old_id = hashlib.md5(old_identity.encode()).hexdigest()
+    new_id = hashlib.md5(new_identity.encode()).hexdigest()
+    try:
+        old_doc = es.get(index="documents", id=old_id)["_source"]
+    except Exception:
+        return False
+
+    new_doc = dict(old_doc)
+    new_doc["filepath"] = new_identity
+    if updated_acl is not None:
+        new_doc["acl"] = {
+            "owner":       updated_acl.owner,
+            "group":       updated_acl.group,
+            "users":       updated_acl.users,
+            "groups":      updated_acl.groups,
+            "public":      updated_acl.public,
+            "permissions": updated_acl.permissions,
+        }
+
+    es.index(index="documents", id=new_id, document=new_doc)
+    es.delete(index="documents", id=old_id, refresh=True)
+    return True
+
+
+def _rename_prefix(old_root: str, new_root: str) -> int:
+    """
+    Renomme en base TOUS les documents dont le filepath commence par
+    old_root — utilisé quand un DOSSIER ENTIER est déplacé/renommé.
+    Couvre aussi bien les fichiers normaux (filepath = chemin disque)
+    que les membres d'archive (filepath = "archive.zip::membre").
+    Aucune réextraction Tika : seul le champ filepath est réécrit.
+
+    NB : pagination simple (size=1000), suffisante pour un dossier de
+    taille raisonnable. Pour des dossiers de plusieurs milliers de
+    fichiers, remplacer par une pagination search_after.
+    """
+    query = {
+        "bool": {
+            "should": [
+                {"prefix": {"filepath": f"{old_root}/"}},
+                {"prefix": {"filepath": f"{old_root}::"}},
+                {"term":   {"filepath": old_root}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+    renamed = 0
+    try:
+        resp = es.search(index="documents", query=query, size=1000)
+    except Exception as e:
+        logging.error(f"Erreur recherche pour renommage de préfixe : {e}")
+        return 0
+
+    for hit in resp["hits"]["hits"]:
+        old_id   = hit["_id"]
+        doc      = dict(hit["_source"])
+        old_path = doc["filepath"]
+        new_path = new_root + old_path[len(old_root):]
+        doc["filepath"] = new_path
+        new_id = hashlib.md5(new_path.encode()).hexdigest()
+        try:
+            es.index(index="documents", id=new_id, document=doc)
+            es.delete(index="documents", id=old_id)
+            renamed += 1
+        except Exception as e:
+            logging.error(f"Erreur renommage ({old_path} -> {new_path}) : {e}")
+
+    if renamed:
+        es.indices.refresh(index="documents")
+    return renamed
+
+
+def _rename_archive_members(old_root: str, new_root: str, updated_acl=None) -> int:
+    """Renomme tous les membres indexés d'une archive déplacée/renommée."""
+    query = {"prefix": {"filepath": f"{old_root}::"}}
+    renamed = 0
+    try:
+        resp = es.search(index="documents", query=query, size=1000)
+    except Exception as e:
+        logging.error(f"Erreur recherche membres d'archive : {e}")
+        return 0
+
+    for hit in resp["hits"]["hits"]:
+        old_id = hit["_id"]
+        doc    = dict(hit["_source"])
+        suffix = doc["filepath"].split("::", 1)[1]
+        new_identity = f"{new_root}::{suffix}"
+        doc["filepath"] = new_identity
+        if updated_acl is not None:
+            doc["acl"] = {
+                "owner":       updated_acl.owner,
+                "group":       updated_acl.group,
+                "users":       updated_acl.users,
+                "groups":      updated_acl.groups,
+                "public":      updated_acl.public,
+                "permissions": updated_acl.permissions,
+            }
+        new_id = hashlib.md5(new_identity.encode()).hexdigest()
+        try:
+            es.index(index="documents", id=new_id, document=doc)
+            es.delete(index="documents", id=old_id)
+            renamed += 1
+        except Exception as e:
+            logging.error(f"Erreur renommage membre ({old_id}) : {e}")
+
+    if renamed:
+        es.indices.refresh(index="documents")
+    return renamed
+
+
 class DocumentHandler(FileSystemEventHandler):
 
     def _is_supported(self, path):
@@ -173,13 +294,47 @@ class DocumentHandler(FileSystemEventHandler):
         delete_from_index(abs_path)
 
     def on_moved(self, event):
-        if event.is_directory or not self._is_supported(event.src_path):
-            return
         src = str(Path(event.src_path).absolute())
         dst = str(Path(event.dest_path).absolute())
+
+        if event.is_directory:
+            # Renommage/déplacement d'un DOSSIER ENTIER : tous les
+            # documents dont le filepath commence par l'ancien chemin
+            # sont renommés directement en base (réécriture du seul
+            # champ filepath), SANS relancer Tika sur chaque fichier.
+            logging.info(f"📁 Dossier déplacé : {src} → {dst}")
+            n = _rename_prefix(src, dst)
+            logging.info(f"   {n} document(s) renommé(s) en base, sans réextraction")
+            return
+
+        if not self._is_supported(event.src_path):
+            return
+
         logging.info(f"🔀 Déplacé : {src} → {dst}")
-        delete_from_index(src)
-        self._safe_index(dst)
+
+        if is_archive(Path(dst)):
+            # Une archive n'est jamais indexée comme document unique,
+            # seuls ses membres le sont ("archive::membre") — il faut
+            # renommer leur préfixe individuellement.
+            acl = extract_acl(dst)
+            n = _rename_archive_members(src, dst, updated_acl=acl)
+            logging.info(f"   {n} membre(s) d'archive renommé(s), sans réextraction")
+            return
+
+        # Renommage d'un fichier normal : copie légère du document déjà
+        # indexé vers la nouvelle identité, sans relancer Tika. Les ACL
+        # sont rafraîchies (opération rapide : stat + getfacl, pas de
+        # comparaison avec Tika) au cas où le déplacement change aussi
+        # les droits (changement de dossier parent).
+        acl = extract_acl(dst)
+        if _copy_document(src, dst, updated_acl=acl):
+            logging.info(f"   ✅ Renommé sans réextraction Tika : {dst}")
+        else:
+            # Document introuvable sous l'ancienne identité (jamais
+            # indexé, ou déjà renommé via l'événement dossier ci-dessus)
+            # : repli sur une indexation complète par sécurité.
+            logging.info(f"   Renommage léger impossible — indexation complète : {dst}")
+            self._safe_index(dst)
 
     def _safe_index(self, filepath: str, retries: int = 3, delay: float = 2):
         for attempt in range(retries):

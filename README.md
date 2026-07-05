@@ -135,6 +135,34 @@ justifier la complexité d'une file de messages. Le pipeline
 producer/workers est réservé aux gros volumes (indexation initiale,
 réindexation complète).
 
+## Renommage/déplacement — pas de réextraction Tika
+
+Renommer un fichier ou un **dossier entier** ne relance jamais Tika :
+le contenu déjà extrait est copié vers la nouvelle identité en base ES
+(réécriture du seul champ `filepath`), ce qui est quasi instantané
+même pour un dossier contenant des milliers de fichiers.
+
+Couvre trois cas :
+- Renommage d'un fichier normal (`_copy_document`)
+- Renommage d'un **dossier entier** — tous les documents dont le
+  chemin commence par l'ancien préfixe sont mis à jour en une seule
+  recherche ES (`_rename_prefix`)
+- Renommage d'une **archive** — tous ses membres indexés
+  (`archive.zip::membre`) sont mis à jour (`_rename_archive_members`)
+
+Les ACL sont rafraîchies à cette occasion (`extract_acl`, opération
+légère : `stat` + `getfacl`, sans rapport avec le coût de Tika).
+
+⚠️ **Limite connue sur CIFS/NFS** : cette optimisation suppose que
+watchdog détecte l'opération comme un véritable renommage (`on_moved`),
+ce qui dépend de la stabilité des numéros d'inode sur le montage
+réseau. Si le serveur CIFS ne les préserve pas de façon fiable,
+watchdog peut percevoir un renommage comme une suppression suivie
+d'une création — dans ce cas, le fichier est réindexé normalement
+(avec Tika) car aucun événement de déplacement n'est jamais généré.
+Si vous observez encore des réextractions complètes après cette mise
+à jour, c'est probablement le signe de ce cas de figure.
+
 ## Lancer en local (nécessite un ES + Kafka + Tika déjà démarrés)
 
 ```bash
