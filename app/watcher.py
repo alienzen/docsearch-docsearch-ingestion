@@ -15,10 +15,11 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, is_excluded, ES_INDEX
+from indexer import index_file, is_excluded, ES_INDEX, relative_to_docs_folder
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
+from path_filter import is_path_allowed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -148,6 +149,19 @@ def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bo
     return True
 
 
+def _new_path_allowed(new_path: str) -> bool:
+    """
+    Vérifie si le NOUVEAU chemin (après renommage de dossier) reste
+    autorisé par les filtres d'inclusion/exclusion. Pour un membre
+    d'archive ("archive.zip::membre"), c'est l'emplacement de
+    l'archive elle-même qui compte (avant le "::").
+    """
+    archive_part = new_path.split("::", 1)[0]
+    rel = relative_to_docs_folder(archive_part)
+    allowed, _ = is_path_allowed(rel)
+    return allowed
+
+
 def _rename_prefix(old_root: str, new_root: str) -> int:
     """
     Renomme en base TOUS les documents dont le filepath commence par
@@ -155,6 +169,11 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
     Couvre aussi bien les fichiers normaux (filepath = chemin disque)
     que les membres d'archive (filepath = "archive.zip::membre").
     Aucune réextraction Tika : seul le champ filepath est réécrit.
+
+    Si le NOUVEL emplacement est désormais exclu par un filtre de
+    chemin (path_filter.py), le document est retiré de l'index plutôt
+    que renommé — évite de laisser des documents indexés dans une
+    zone qu'on vient d'exclure.
 
     NB : pagination simple (size=1000), suffisante pour un dossier de
     taille raisonnable. Pour des dossiers de plusieurs milliers de
@@ -170,7 +189,7 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
             "minimum_should_match": 1,
         }
     }
-    renamed = 0
+    renamed, removed = 0, 0
     try:
         resp = es.search(index=ES_INDEX, query=query, size=1000)
     except Exception as e:
@@ -182,6 +201,16 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
         doc      = dict(hit["_source"])
         old_path = doc["filepath"]
         new_path = new_root + old_path[len(old_root):]
+
+        if not _new_path_allowed(new_path):
+            try:
+                es.delete(index=ES_INDEX, id=old_id)
+                removed += 1
+                logging.info(f"   Nouvel emplacement exclu — retiré de l'index : {new_path}")
+            except Exception as e:
+                logging.error(f"Erreur suppression ({old_path}) : {e}")
+            continue
+
         doc["filepath"] = new_path
         new_id = hashlib.md5(new_path.encode()).hexdigest()
         try:
@@ -191,8 +220,10 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
         except Exception as e:
             logging.error(f"Erreur renommage ({old_path} -> {new_path}) : {e}")
 
-    if renamed:
+    if renamed or removed:
         es.indices.refresh(index=ES_INDEX)
+    if removed:
+        logging.info(f"   ({removed} document(s) retiré(s) car nouvel emplacement exclu)")
     return renamed
 
 
@@ -252,14 +283,35 @@ class DocumentHandler(FileSystemEventHandler):
         name = Path(path).name
         return is_excluded(name) or name.startswith("#") or name.endswith(".tmp")
 
+    def _path_allowed(self, path) -> bool:
+        """
+        Pré-filtre inclusion/exclusion de sous-dossiers (path_filter.py).
+        index_file() revérifie de toute façon en interne (défense en
+        profondeur) — ce pré-filtre évite surtout de lancer inutilement
+        la boucle d'attente de stabilisation de _safe_index() pour un
+        fichier qu'on sait déjà destiné à être rejeté.
+        """
+        rel_path = relative_to_docs_folder(path)
+        allowed, reason = is_path_allowed(rel_path)
+        if not allowed:
+            logging.debug(f"[IGNORÉ] {path} — {reason}")
+        return allowed
+
     def on_created(self, event):
         if event.is_directory or not self._is_supported(event.src_path) or self._is_temp(event.src_path):
+            return
+        if not self._path_allowed(event.src_path):
             return
         logging.info(f"📄 Nouveau fichier : {event.src_path}")
         self._safe_index(event.src_path)
 
     def on_modified(self, event):
         if event.is_directory or not self._is_supported(event.src_path) or self._is_temp(event.src_path):
+            return
+        if not self._path_allowed(event.src_path):
+            # Le fichier est dans un dossier désormais exclu — s'il avait
+            # été indexé avant l'ajout du filtre, le retirer proprement.
+            delete_from_index(event.src_path)
             return
         logging.info(f"✏️  Fichier modifié : {event.src_path}")
 
@@ -318,6 +370,14 @@ class DocumentHandler(FileSystemEventHandler):
             return
 
         logging.info(f"🔀 Déplacé : {src} → {dst}")
+
+        if not self._path_allowed(dst):
+            # Déplacé VERS un emplacement désormais exclu : retirer de
+            # l'index plutôt que de renommer (le fichier existe toujours
+            # sur le disque, mais ne doit plus être indexé à cet endroit).
+            delete_from_index(src)
+            logging.info(f"   Déplacé vers un emplacement exclu — retiré de l'index : {dst}")
+            return
 
         if is_archive(Path(dst)):
             # Une archive n'est jamais indexée comme document unique,

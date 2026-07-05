@@ -135,6 +135,51 @@ justifier la complexité d'une file de messages. Le pipeline
 producer/workers est réservé aux gros volumes (indexation initiale,
 réindexation complète).
 
+## Inclusion / exclusion de sous-dossiers
+
+Certains sous-dossiers de `DOCS_FOLDER` peuvent être exclus (liste
+noire) ou, à l'inverse, être les **seuls** indexés (liste blanche) —
+modifiable à chaud, sans redémarrage (même mécanisme Redis) :
+
+```bash
+./manage.sh exclude-path finance/confidentiel
+./manage.sh exclude-path "*/tmp"          # guillemets nécessaires (le shell ne doit pas développer le *)
+./manage.sh exclude-path "*.cache"
+./manage.sh include-path finance           # bascule en liste blanche
+./manage.sh list-path-filters
+./manage.sh remove-path-filter finance/confidentiel
+```
+
+**Règles de correspondance** (voir `path_filter.py`) :
+- Chemins toujours **relatifs à `DOCS_FOLDER`**, jamais absolus
+- **L'exclusion est prioritaire** sur l'inclusion — un chemin exclu le
+  reste même s'il correspond aussi à un motif inclus
+- Motif **sans `/`** (`tmp`, `*.cache`) : correspond à un composant de
+  chemin à n'importe quel niveau de profondeur (comme `.gitignore`)
+- Motif **avec `/`** (`finance/confidentiel`) : ancré — correspond au
+  chemin complet ou à un préfixe de dossier (exclure un dossier exclut
+  automatiquement tout son contenu)
+
+**Où le filtre s'applique** :
+- `producer.py` **élague `os.walk`** — un dossier exclu n'est même pas
+  parcouru (gain de temps réel sur un sous-arbre volumineux). Seule la
+  liste noire sert à l'élagage (la liste blanche ne peut pas élaguer
+  sans risque de sauter un ancêtre nécessaire — voir `is_dir_excluded`)
+- `watcher.py` vérifie chaque événement (création, modification,
+  déplacement) — y compris le cas d'un fichier **déplacé vers** un
+  dossier désormais exclu (retiré de l'index plutôt que renommé) et le
+  renommage d'un **dossier entier** vers une zone exclue
+- `indexer.py` / `index_file()` : contrôle définitif, point commun
+
+⚠️ **Les documents déjà indexés dans un dossier fraîchement exclu ne
+sont pas supprimés automatiquement** — la règle ne s'applique qu'aux
+nouveaux passages (scan ou événement temps réel). Relancer
+`./manage.sh init <sous-dossier>` sur la zone concernée après un
+`exclude-path` n'aide pas non plus (le producer élague justement ce
+qu'il ne faut plus indexer) : il faut une purge manuelle par requête ES
+(`delete_by_query` sur un préfixe de `filepath`) si le nettoyage de
+l'existant est nécessaire.
+
 ## Paramètres opérationnels dynamiques
 
 Au-delà des types de fichiers, les réglages suivants sont aussi

@@ -20,6 +20,7 @@ from archive_extractor import (
     is_archive, safe_extract_archive, ArchiveExtractionError, max_depth
 )
 from filetype_config import is_allowed, get_enabled_extensions
+from path_filter import is_path_allowed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -261,10 +262,33 @@ def index_archive(filepath: str):
     logging.info(f"✅ Archive traitée : {path.name}")
 
 
+def relative_to_docs_folder(filepath: str) -> str:
+    """
+    Calcule le chemin d'un fichier relatif à DOCS_FOLDER — c'est ce
+    chemin qui est comparé aux motifs d'inclusion/exclusion de
+    path_filter.py (jamais un chemin absolu, pour que les motifs
+    restent valables quel que soit le point de montage).
+    Si le fichier est hors de DOCS_FOLDER (cas rare, usage direct du
+    module hors pipeline normal), retourne le nom seul — aucun
+    filtrage de chemin n'est alors possible mais ça n'empêche pas
+    l'indexation.
+    """
+    try:
+        return str(Path(filepath).resolve().relative_to(Path(DOCS_FOLDER).resolve()))
+    except ValueError:
+        return Path(filepath).name
+
+
 def index_file(filepath: str):
     path = Path(filepath)
     if is_excluded(path.name):
         logging.debug(f"  [IGNORÉ] {path.name} (fichier temporaire)")
+        return
+
+    rel_path = relative_to_docs_folder(filepath)
+    allowed, reason = is_path_allowed(rel_path)
+    if not allowed:
+        logging.info(f"  [IGNORÉ] {path.name} — {reason}")
         return
 
     if is_archive(path):
