@@ -18,6 +18,7 @@ from acl_extractor import extract_acl, FileACL
 from indexer import index_file, is_excluded
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
+from runtime_config import get_param
 
 logging.basicConfig(
     level=logging.INFO,
@@ -361,21 +362,39 @@ class DocumentHandler(FileSystemEventHandler):
 def start_watcher(folder_path: str, recursive: bool = True):
     # PollingObserver est requis pour les partages réseau (CIFS, NFS, SMB)
     # car inotify ne reçoit pas les événements filesystem sur ces montages.
-    # L'intervalle de polling est configurable via WATCHER_POLL_INTERVAL
-    # (défaut 10 secondes — réduire si détection plus rapide souhaitée).
-    poll_interval = int(os.getenv("WATCHER_POLL_INTERVAL", "10"))
+    # L'intervalle de polling (watcher_poll_interval) est modifiable à
+    # chaud via ./manage.sh set-config — contrairement aux autres
+    # paramètres dynamiques, le changer nécessite ici de redémarrer
+    # l'observateur watchdog (le timeout est fixé à sa construction),
+    # ce que la boucle principale ci-dessous fait automatiquement dès
+    # qu'elle détecte un changement.
+    handler = DocumentHandler()
 
-    handler  = DocumentHandler()
-    observer = PollingObserver(timeout=poll_interval)
-    observer.schedule(handler, folder_path, recursive=recursive)
-    observer.start()
+    def _new_observer(interval: int) -> PollingObserver:
+        obs = PollingObserver(timeout=interval)
+        obs.schedule(handler, folder_path, recursive=recursive)
+        obs.start()
+        return obs
+
+    current_interval = get_param("watcher_poll_interval")
+    observer = _new_observer(current_interval)
     logging.info(
         f"👁️  Surveillance démarrée : {folder_path} "
-        f"(mode polling toutes les {poll_interval}s — compatible CIFS/NFS)"
+        f"(mode polling toutes les {current_interval}s — compatible CIFS/NFS)"
     )
     try:
         while True:
-            time.sleep(1)
+            time.sleep(5)
+            new_interval = get_param("watcher_poll_interval")
+            if new_interval != current_interval:
+                logging.info(
+                    f"🔄 Intervalle de polling modifié : {current_interval}s → "
+                    f"{new_interval}s — redémarrage de l'observateur."
+                )
+                observer.stop()
+                observer.join()
+                observer = _new_observer(new_interval)
+                current_interval = new_interval
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

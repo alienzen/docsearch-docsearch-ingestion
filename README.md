@@ -135,6 +135,31 @@ justifier la complexité d'une file de messages. Le pipeline
 producer/workers est réservé aux gros volumes (indexation initiale,
 réindexation complète).
 
+## Paramètres opérationnels dynamiques
+
+Au-delà des types de fichiers, les réglages suivants sont aussi
+modifiables à chaud (même mécanisme Redis, voir `runtime_config.py`) :
+
+| Paramètre | Défaut | Effectif après |
+|---|---|---|
+| `archive_max_files` | 5000 | Immédiat (relu à chaque archive ouverte) |
+| `archive_max_total_size_mb` | 1000 | Immédiat |
+| `archive_max_depth` | 1 | Immédiat |
+| `worker_flush_interval` | 10 (s) | ≤ 10s (relu à chaque itération du worker) |
+| `worker_batch_size` | 200 | ⚠️ Le seuil de flush bulk() est immédiat, mais `max_poll_records` (réglage bas niveau du consumer Kafka) reste fixé au démarrage — redémarrer le worker pour un effet complet |
+| `watcher_poll_interval` | 10 (s) | ≤ 5s (le watcher détecte le changement et redémarre son propre observateur automatiquement, sans redémarrer le conteneur) |
+
+```bash
+./manage.sh get-config
+./manage.sh set-config archive_max_depth 2
+./manage.sh set-config worker_flush_interval 5
+./manage.sh set-config watcher_poll_interval 3
+```
+
+**Résilience** : comme pour les types de fichiers, un Redis injoignable
+fait retomber sur les valeurs des variables d'environnement (elles-mêmes
+avec un défaut) — jamais d'arrêt de service pour un problème de config.
+
 ## Configuration dynamique des types de fichiers
 
 Les extensions indexées et leur taille maximale sont modifiables à

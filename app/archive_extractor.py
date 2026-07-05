@@ -19,14 +19,22 @@ import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+from runtime_config import get_param
 
-# ── Limites configurables (protection zip bomb) ──────────────────
-ARCHIVE_MAX_FILES     = int(os.getenv("ARCHIVE_MAX_FILES", "5000"))
-ARCHIVE_MAX_TOTAL_MB  = int(os.getenv("ARCHIVE_MAX_TOTAL_SIZE_MB", "1000"))
-ARCHIVE_MAX_TOTAL_SIZE = ARCHIVE_MAX_TOTAL_MB * 1024 * 1024
+# ── Limites (protection zip bomb) ─────────────────────────────────
+# Lues dynamiquement à chaque appel via runtime_config (modifiables à
+# chaud sans redémarrage — voir ./manage.sh set-config).
+def _max_files() -> int:
+    return get_param("archive_max_files")
 
-# Profondeur maximale d'archives imbriquées (zip dans un zip, etc.)
-ARCHIVE_MAX_DEPTH = int(os.getenv("ARCHIVE_MAX_DEPTH", "1"))
+def _max_total_size_bytes() -> int:
+    return get_param("archive_max_total_size_mb") * 1024 * 1024
+
+def _max_total_mb() -> int:
+    return get_param("archive_max_total_size_mb")
+
+def max_depth() -> int:
+    return get_param("archive_max_depth")
 
 try:
     import py7zr
@@ -70,15 +78,16 @@ def _extract_zip(archive_path: Path, dest: Path) -> list[Path]:
     total_size = 0
     with zipfile.ZipFile(archive_path) as zf:
         infos = [i for i in zf.infolist() if not i.is_dir()]
-        if len(infos) > ARCHIVE_MAX_FILES:
+        max_files = _max_files()
+        if len(infos) > max_files:
             raise ArchiveExtractionError(
-                f"{len(infos)} fichiers dans l'archive (limite {ARCHIVE_MAX_FILES})"
+                f"{len(infos)} fichiers dans l'archive (limite {max_files})"
             )
         for info in infos:
             total_size += info.file_size
-            if total_size > ARCHIVE_MAX_TOTAL_SIZE:
+            if total_size > _max_total_size_bytes():
                 raise ArchiveExtractionError(
-                    f"Taille décompressée > {ARCHIVE_MAX_TOTAL_MB} Mo — extraction interrompue"
+                    f"Taille décompressée > {_max_total_mb()} Mo — extraction interrompue"
                 )
             target = _safe_join(dest, info.filename)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -94,15 +103,16 @@ def _extract_tar(archive_path: Path, dest: Path) -> list[Path]:
     # mode "r:*" détecte automatiquement gzip/bz2/xz ou l'absence de compression
     with tarfile.open(archive_path, mode="r:*") as tf:
         members = [m for m in tf.getmembers() if m.isfile()]
-        if len(members) > ARCHIVE_MAX_FILES:
+        max_files = _max_files()
+        if len(members) > max_files:
             raise ArchiveExtractionError(
-                f"{len(members)} fichiers dans l'archive (limite {ARCHIVE_MAX_FILES})"
+                f"{len(members)} fichiers dans l'archive (limite {max_files})"
             )
         for member in members:
             total_size += member.size
-            if total_size > ARCHIVE_MAX_TOTAL_SIZE:
+            if total_size > _max_total_size_bytes():
                 raise ArchiveExtractionError(
-                    f"Taille décompressée > {ARCHIVE_MAX_TOTAL_MB} Mo — extraction interrompue"
+                    f"Taille décompressée > {_max_total_mb()} Mo — extraction interrompue"
                 )
             # filter="data" (Python 3.12+) neutralise nativement le path
             # traversal, les liens symboliques dangereux et les permissions
@@ -119,17 +129,18 @@ def _extract_7z(archive_path: Path, dest: Path) -> list[Path]:
         )
     with py7zr.SevenZipFile(archive_path, mode="r") as z:
         names = z.getnames()
-        if len(names) > ARCHIVE_MAX_FILES:
+        max_files = _max_files()
+        if len(names) > max_files:
             raise ArchiveExtractionError(
-                f"{len(names)} fichiers dans l'archive (limite {ARCHIVE_MAX_FILES})"
+                f"{len(names)} fichiers dans l'archive (limite {max_files})"
             )
         z.extractall(path=dest)
 
     extracted = [p for p in dest.rglob("*") if p.is_file()]
     total_size = sum(p.stat().st_size for p in extracted)
-    if total_size > ARCHIVE_MAX_TOTAL_SIZE:
+    if total_size > _max_total_size_bytes():
         raise ArchiveExtractionError(
-            f"Taille décompressée > {ARCHIVE_MAX_TOTAL_MB} Mo"
+            f"Taille décompressée > {_max_total_mb()} Mo"
         )
     return extracted
 

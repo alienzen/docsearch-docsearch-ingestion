@@ -16,7 +16,7 @@ from tika import parser as tika_parser
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl
 from archive_extractor import (
-    is_archive, safe_extract_archive, ArchiveExtractionError, ARCHIVE_MAX_DEPTH
+    is_archive, safe_extract_archive, ArchiveExtractionError, max_depth
 )
 from filetype_config import is_allowed, get_enabled_extensions
 
@@ -223,7 +223,7 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: in
             identity = f"{identity_root}::{rel_member_path}"
 
             if is_archive(real_path):
-                if depth < ARCHIVE_MAX_DEPTH:
+                if depth < max_depth():
                     logging.info(f"  [ARCHIVE IMBRIQUÉE] {identity}")
                     _process_archive(real_path, identity, acl, depth + 1)
                 else:

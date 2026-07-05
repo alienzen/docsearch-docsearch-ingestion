@@ -23,12 +23,14 @@ from acl_extractor import extract_acl
 from indexer import get_author, get_title, is_excluded, index_archive
 from archive_extractor import is_archive
 from filetype_config import is_allowed
+from runtime_config import get_param
 
-# Flush du buffer bulk() même si WORKER_BATCH_SIZE n'est pas atteint —
-# indispensable pour les petits volumes (le buffer ne se viderait
-# sinon jamais, cf. bug historique : les documents restaient extraits
-# en mémoire sans jamais être écrits dans Elasticsearch).
-FLUSH_INTERVAL_SECONDS = int(os.getenv("WORKER_FLUSH_INTERVAL", "10"))
+# WORKER_BATCH_SIZE (Kafka max_poll_records) reste fixé au démarrage :
+# changer cette valeur nécessite de recréer le KafkaConsumer, donc un
+# redémarrage du worker (./manage.sh set-config ne le couvre pas).
+# En revanche le SEUIL DE FLUSH bulk() et l'intervalle de flush sont
+# relus dynamiquement à chaque itération via runtime_config — voir
+# la boucle de run_worker() ci-dessous.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +109,10 @@ def run_worker(batch_size: int = BATCH):
         # dans le buffer en mémoire, jamais flushé vers ES.
         enable_auto_commit=False,
     )
-    logging.info(f"Worker ACL démarré (flush toutes les {FLUSH_INTERVAL_SECONDS}s ou tous les {batch_size} documents).")
+    logging.info(
+        f"Worker ACL démarré (max_poll_records={batch_size}, fixé au démarrage ; "
+        f"seuil de flush et intervalle relus dynamiquement via runtime_config)."
+    )
     buffer: list = []
     errors_total = 0
     last_flush = time.time()
@@ -168,8 +173,14 @@ def run_worker(batch_size: int = BATCH):
                         logging.error(f"Erreur [{filepath}] : {e}")
 
             now = time.time()
+            # Seuil et intervalle de flush relus à chaque itération —
+            # modifiables à chaud via ./manage.sh set-config, sans
+            # redémarrer le worker (contrairement à max_poll_records,
+            # qui reste fixé pour la durée de vie du KafkaConsumer).
+            flush_threshold     = get_param("worker_batch_size")
+            flush_interval_secs = get_param("worker_flush_interval")
             should_flush = buffer and (
-                len(buffer) >= batch_size or (now - last_flush) >= FLUSH_INTERVAL_SECONDS
+                len(buffer) >= flush_threshold or (now - last_flush) >= flush_interval_secs
             )
             if should_flush:
                 errors_total = _flush(buffer, errors_total)
