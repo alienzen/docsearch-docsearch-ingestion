@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 import tempfile
 from tika import parser as tika_parser
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 from acl_extractor import extract_acl
 from archive_extractor import (
     is_archive, safe_extract_archive, ArchiveExtractionError, max_depth
 )
 from filetype_config import is_allowed, get_enabled_extensions
-from path_filter import is_path_allowed
+from path_filter import is_path_allowed, matches_pattern
 
 logging.basicConfig(
     level=logging.INFO,
@@ -350,6 +351,78 @@ def index_folder(folder_path: str):
                 logging.error(f"  [ERREUR] {filename} : {e}")
     restore_after_bulk()
     logging.info(f"✅ {count} fichiers indexés.")
+
+
+def _relative_candidates(filepath: str) -> list[str]:
+    """
+    Calcule le chemin relatif à DOCS_FOLDER à comparer à un motif de
+    purge, à partir du champ `filepath` stocké dans un document ES.
+
+    Pour un membre d'archive ("archive.zip::membre"), seul l'emplacement
+    de L'ARCHIVE ELLE-MÊME est retourné — jamais le chemin interne du
+    membre. C'est cohérent avec le reste du système : index_file() ne
+    vérifie le filtre de chemin qu'une seule fois, pour l'archive dans
+    son ensemble, avant d'en extraire les membres (voir _process_archive) ;
+    le chemin interne d'un membre n'a jamais sa propre existence en tant
+    que "chemin sur le disque" filtrable indépendamment.
+    """
+    docs_root = str(Path(DOCS_FOLDER).resolve())
+    archive_part = filepath.split("::", 1)[0]
+
+    try:
+        rel = str(Path(archive_part).resolve().relative_to(docs_root))
+    except ValueError:
+        rel = archive_part
+
+    return [rel]
+
+
+def purge_path(pattern: str, dry_run: bool = True) -> int:
+    """
+    Supprime de l'index tous les documents DÉJÀ INDEXÉS dont le chemin
+    (relatif à DOCS_FOLDER) correspond à `pattern` — même syntaxe glob
+    que path_filter.py (exclude-path/include-path).
+
+    Utile car exclude-path n'agit que sur les futurs passages
+    (scan/watcher) : cette fonction nettoie l'EXISTANT.
+
+    dry_run=True (défaut) : ne supprime rien, retourne seulement le
+    nombre de documents qui correspondraient au motif — toujours
+    utiliser ce mode en premier pour vérifier avant de purger pour de
+    bon (l'opération réelle est irréversible sans réindexation).
+
+    Utilise le scan/scroll ES (pas une simple recherche size=1000) pour
+    rester correct même sur un index de plusieurs millions de documents.
+    """
+    to_delete = []
+    matched = 0
+
+    for hit in es_scan(
+        es, index=ES_INDEX,
+        query={"query": {"match_all": {}}},
+        _source=["filepath"],
+    ):
+        filepath = hit["_source"].get("filepath", "")
+        if not filepath:
+            continue
+
+        candidates = _relative_candidates(filepath)
+        if any(matches_pattern(c, pattern) for c in candidates):
+            matched += 1
+            if not dry_run:
+                to_delete.append({
+                    "_op_type": "delete",
+                    "_index":   ES_INDEX,
+                    "_id":      hit["_id"],
+                })
+
+    if to_delete:
+        ok, errors = es_bulk(es, to_delete, raise_on_error=False)
+        if errors:
+            logging.error(f"[purge_path] {len(errors)} erreur(s) de suppression")
+        es.indices.refresh(index=ES_INDEX)
+
+    return matched
 
 
 if __name__ == "__main__":

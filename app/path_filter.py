@@ -201,3 +201,13 @@ def remove_filter(pattern: str) -> dict:
         config["excluded"] = [p for p in config["excluded"] if p != pattern]
         config["included"] = [p for p in config["included"] if p != pattern]
     return _read_write(mutate)
+
+
+def matches_pattern(rel_path: str, pattern: str) -> bool:
+    """
+    Version publique de _matches_any pour un seul motif — réutilisée
+    par la commande de purge (indexer.py: purge_path) pour retrouver,
+    parmi les documents déjà indexés, ceux qui correspondraient à un
+    motif d'exclusion donné (même syntaxe glob que exclude-path).
+    """
+    return _matches_any(rel_path, [pattern])

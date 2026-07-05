@@ -173,12 +173,21 @@ modifiable à chaud, sans redémarrage (même mécanisme Redis) :
 
 ⚠️ **Les documents déjà indexés dans un dossier fraîchement exclu ne
 sont pas supprimés automatiquement** — la règle ne s'applique qu'aux
-nouveaux passages (scan ou événement temps réel). Relancer
-`./manage.sh init <sous-dossier>` sur la zone concernée après un
-`exclude-path` n'aide pas non plus (le producer élague justement ce
-qu'il ne faut plus indexer) : il faut une purge manuelle par requête ES
-(`delete_by_query` sur un préfixe de `filepath`) si le nettoyage de
-l'existant est nécessaire.
+nouveaux passages (scan ou événement temps réel). Utiliser
+`./manage.sh purge-path <motif>` pour nettoyer l'existant (aperçu
+avant confirmation, même syntaxe glob que `exclude-path`) :
+
+```bash
+./manage.sh exclude-path finance/confidentiel   # pour le futur
+./manage.sh purge-path finance/confidentiel     # nettoie l'existant
+```
+
+`purge_path()` (dans `indexer.py`) utilise le scan/scroll ES (pas une
+simple recherche limitée) pour rester correct même sur un index de
+plusieurs millions de documents. Pour les membres d'archive, seul
+l'emplacement de l'**archive elle-même** est comparé au motif (jamais
+le chemin interne d'un membre) — cohérent avec la façon dont
+`index_file()` filtre les archives à l'indexation.
 
 ## Paramètres opérationnels dynamiques
 
