@@ -226,7 +226,23 @@ chaud (Redis), **sans redémarrer** `producer.py`, `worker.py` ni
 ./manage.sh set-filetype jpg --enabled true --max-size 5
 ./manage.sh set-filetype pdf --max-size 100
 ./manage.sh set-filetype docx --enabled false
+
+# Les formats d'archive sont couverts de la même façon :
+./manage.sh set-filetype zip --enabled false      # désactive tout .zip
+./manage.sh set-filetype tar.gz --max-size 200     # limite les .tar.gz à 200 Mo
 ```
+
+⚠️ **Extensions composées** (`tar.gz`, `tar.bz2`, `tar.xz`) : la clé
+de configuration correspond à `archive_extractor.archive_kind()`, pas
+à l'extension de fichier brute — `Path("x.tar.gz").suffix` ne renvoie
+que `.gz`, ce qui matcherait à tort une entrée générique. Toutes les
+clés d'archive disponibles : `zip`, `tar`, `tar.gz`, `tgz`, `tar.bz2`,
+`tbz2`, `tar.xz`, `txz`, `7z`.
+
+Pour un fichier archive, `max_size_mb` limite la taille du **fichier
+archive lui-même** avant toute extraction — distinct de
+`archive_max_total_size_mb` (paramètre opérationnel, voir plus bas)
+qui limite la taille **décompressée totale** de son contenu.
 
 Le changement est pris en compte dans un délai maximal de
 `FILETYPE_CONFIG_CACHE_TTL` secondes (10s par défaut) par tous les
@@ -235,13 +251,16 @@ qu'une seule fois au démarrage.
 
 **Où le contrôle s'applique** (voir `filetype_config.py`) :
 - `producer.py` : avant publication sur Kafka (évite de publier des
-  messages pour des fichiers qui seront rejetés de toute façon)
-- `worker.py` : re-vérifié avant l'appel Tika (le plus coûteux à éviter)
-- `indexer.py` (`index_file`, `_process_archive`) : contrôle définitif,
-  point d'entrée commun utilisé aussi par `watcher.py`
-- Chaque **membre d'archive** est vérifié individuellement (une archive
-  peut contenir un fichier trop volumineux même si l'archive entière
-  passe la limite globale `ARCHIVE_MAX_TOTAL_SIZE_MB`)
+  messages pour des fichiers qui seront rejetés de toute façon) —
+  s'applique aussi aux archives elles-mêmes, pas seulement aux
+  fichiers normaux
+- `worker.py` : re-vérifié avant l'appel Tika / l'extraction d'archive
+  (les opérations les plus coûteuses à éviter)
+- `indexer.py` (`index_file`) : contrôle définitif de l'archive
+  elle-même, point d'entrée commun utilisé aussi par `watcher.py`
+- Chaque **membre d'archive** est en plus vérifié individuellement
+  dans `_process_archive` (un fichier trop volumineux à l'intérieur
+  d'une archive par ailleurs autorisée reste filtré)
 
 **Résilience** : si Redis est injoignable, repli automatique sur une
 configuration par défaut codée en dur (`DEFAULT_CONFIG` dans

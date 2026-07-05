@@ -50,13 +50,34 @@ class ArchiveExtractionError(Exception):
     suspect, format non supporté, ou dépendance manquante)."""
 
 
+def archive_kind(path: Path) -> str | None:
+    """
+    Retourne la clé canonique du format d'archive (utilisée comme
+    'extension' dans filetype_config.py, pour activer/désactiver un
+    format d'archive et fixer sa taille max), ou None si ce n'est pas
+    une archive reconnue.
+
+    Ne PAS utiliser path.suffix pour ça : Path("x.tar.gz").suffix vaut
+    ".gz" (seul le dernier composant), pas ".tar.gz" — ce qui ferait
+    matcher à tort la config sur une clé "gz" plutôt que "tar.gz".
+    """
+    name = path.name.lower()
+    if name.endswith(".tar.gz"):  return "tar.gz"
+    if name.endswith(".tar.bz2"): return "tar.bz2"
+    if name.endswith(".tar.xz"):  return "tar.xz"
+    if name.endswith(".tgz"):     return "tgz"
+    if name.endswith(".tbz2"):    return "tbz2"
+    if name.endswith(".txz"):     return "txz"
+    if name.endswith(".tar"):     return "tar"
+    if name.endswith(".zip"):     return "zip"
+    if name.endswith(".7z"):      return "7z"
+    return None
+
+
 def is_archive(path: Path) -> bool:
     """Détecte une archive par son nom de fichier (gère les doubles
-    extensions comme .tar.gz)."""
-    name = path.name.lower()
-    if name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
-        return True
-    return path.suffix.lower() in {".zip", ".tar", ".tgz", ".tbz2", ".txz", ".7z"}
+    extensions comme .tar.gz) — voir archive_kind() pour le détail."""
+    return archive_kind(path) is not None
 
 
 def _safe_join(base: Path, member_name: str) -> Path:

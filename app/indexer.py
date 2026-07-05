@@ -18,7 +18,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 from acl_extractor import extract_acl
 from archive_extractor import (
-    is_archive, safe_extract_archive, ArchiveExtractionError, max_depth
+    is_archive, archive_kind, safe_extract_archive, ArchiveExtractionError, max_depth
 )
 from filetype_config import is_allowed, get_enabled_extensions
 from path_filter import is_path_allowed, matches_pattern
@@ -293,6 +293,12 @@ def index_file(filepath: str):
         return
 
     if is_archive(path):
+        kind = archive_kind(path)
+        size = path.stat().st_size
+        allowed, reason = is_allowed(kind, size)
+        if not allowed:
+            logging.info(f"  [IGNORÉ] {path.name} — {reason}")
+            return
         index_archive(filepath)
         return
 

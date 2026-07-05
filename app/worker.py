@@ -21,7 +21,7 @@ from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
 from indexer import get_author, get_title, is_excluded, index_archive, ES_INDEX
-from archive_extractor import is_archive
+from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
 
@@ -137,6 +137,20 @@ def run_worker(batch_size: int = BATCH):
                         continue
 
                     if is_archive(Path(filepath)):
+                        # Re-vérification (défense en profondeur, la
+                        # config a pu changer entre publication et
+                        # consommation) avant d'extraire — évite de
+                        # lancer une extraction potentiellement lourde
+                        # pour une archive désormais désactivée.
+                        try:
+                            kind = archive_kind(Path(filepath))
+                            size = Path(filepath).stat().st_size
+                        except OSError:
+                            continue
+                        allowed, reason = is_allowed(kind, size)
+                        if not allowed:
+                            logging.info(f"[IGNORÉ] {filepath} — {reason}")
+                            continue
                         # Traité directement (extraction + indexation
                         # immédiate de chaque membre, pas de mise en
                         # buffer bulk() ici) : le fichier archive est

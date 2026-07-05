@@ -30,7 +30,7 @@ from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
 from indexer import is_excluded, create_index, es
-from archive_extractor import is_archive
+from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded
 
@@ -104,17 +104,21 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
             extension = path.suffix.lower()
             archive = is_archive(path)
 
-            if not archive:
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    skipped += 1
-                    continue
-                allowed, reason = is_allowed(extension, size)
-                if not allowed:
-                    logging.debug(f"[IGNORÉ] {filepath} — {reason}")
-                    skipped += 1
-                    continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                skipped += 1
+                continue
+
+            # Pour une archive, la clé de config est archive_kind()
+            # (ex: "tar.gz"), PAS extension/path.suffix (qui vaudrait
+            # ".gz" pour "x.tar.gz" — voir archive_extractor.py).
+            check_key = archive_kind(path) if archive else extension
+            allowed, reason = is_allowed(check_key, size)
+            if not allowed:
+                logging.debug(f"[IGNORÉ] {filepath} — {reason}")
+                skipped += 1
+                continue
 
             message = {
                 "filepath":  str(path.resolve()),
