@@ -10,14 +10,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Binding Python pour libpff (archives PST Outlook) — le paquet
     # s'appelle python3-pypff (PAS python3-libpff, qui n'existe pas),
     # disponible directement via apt sur Debian 12, jamais publié sur
-    # PyPI. Module Python fourni : "pypff" (voir vérification ci-dessous).
+    # PyPI. Module Python fourni : "pypff".
+    #
+    # IMPORTANT : ce paquet compile pypff contre le Python SYSTÈME
+    # Debian (/usr/bin/python3), qui est un exécutable DIFFÉRENT du
+    # Python 3.12 fourni par cette image de base (/usr/local/bin/python3,
+    # utilisé par le reste de l'application via pip). Une extension C
+    # compilée pour l'un n'est PAS chargeable par l'autre — d'où
+    # l'installation explicite du paquet système "python3" ci-dessous,
+    # et l'usage exclusif du chemin /usr/bin/python3 (jamais "python3"
+    # nu, qui résoudrait vers /usr/local/bin/python3 via le PATH) pour
+    # tout ce qui a besoin de pypff (voir pst_extractor.py/pst_worker.py
+    # et https://github.com/docker-library/python/issues/671).
+    python3 \
     python3-pypff \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Vérification que le module pypff est bien disponible
-RUN python3 -c "import pypff; print('pypff OK')"
+# Vérification EXPLICITE avec /usr/bin/python3 — "python3" seul
+# résoudrait vers /usr/local/bin/python3 (3.12, l'image de base) où
+# pypff n'est PAS installé, et cette vérification échouerait à tort.
+RUN /usr/bin/python3 -c "import pypff; print('pypff OK (Python système)')"
 
 WORKDIR /app
 

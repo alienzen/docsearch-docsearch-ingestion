@@ -1,78 +1,49 @@
 # pst_extractor.py — Extraction des emails depuis les archives PST
-# Mis à jour le 29/06/2026 — ACL intégrées, ES 9.4.2
+# Mis à jour le 05/07/2026 — extraction pypff isolée en sous-processus
+#
+# pypff (paquet apt python3-pypff) est compilé contre le Python
+# SYSTÈME Debian (/usr/bin/python3), PAS contre le Python 3.12 fourni
+# par l'image de base python:3.12-slim (/usr/local/bin/python3), sous
+# lequel tourne le reste de l'application (elasticsearch, tika...).
+# Ces deux interpréteurs sont totalement indépendants : une extension C
+# compilée pour l'un n'est PAS chargeable par l'autre — "import pypff"
+# échouait silencieusement ici alors que l'installation apt réussissait
+# (voir https://github.com/docker-library/python/issues/671).
+#
+# La lecture du PST est donc déléguée à pst_worker.py, exécuté
+# explicitement avec /usr/bin/python3 (sans autre dépendance que
+# pypff), qui retourne une ligne JSON par email sur stdout. Ce module
+# (sous Python 3.12) parse cette sortie et se charge du reste (ACL,
+# indexation ES) — inchangé par rapport à avant.
 
 import os
-ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
-ES_INDEX = os.getenv("ES_INDEX", "documents")
+ES_HOST     = os.getenv("ES_HOST", "http://localhost:9200")
+ES_INDEX    = os.getenv("ES_INDEX", "documents")
 DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
+import json
 import hashlib
 import logging
+import subprocess
+from pathlib import Path
 from datetime import datetime, timezone
-
-# Le paquet apt Debian/Ubuntu s'appelle python3-pypff (PAS
-# python3-libpff, qui n'existe pas) et fournit le module "pypff" —
-# confirmé via le nom du répertoire source du binding (pypff_message.h,
-# pypff_file_types.h, etc. dans le paquet source "libpff").
-import pypff
 
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PST] %(message)s")
 
-ES_HOST = ES_HOST
 es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeout=60)
 
-
-def safe_str(value) -> str:
-    if value is None:
-        return ""
-    return value if isinstance(value, str) else value.decode("utf-8", errors="replace")
-
-
-def format_date(pypff_date):
-    try:
-        return pypff_date.isoformat() if pypff_date else None
-    except Exception:
-        return None
+# Python SYSTÈME Debian — PAS le "python3" du PATH (qui résout vers
+# /usr/local/bin/python3, le Python 3.12 de l'image de base, incompatible
+# avec le module pypff compilé par apt contre le Python système).
+SYSTEM_PYTHON = "/usr/bin/python3"
+PST_WORKER    = str(Path(__file__).parent / "pst_worker.py")
 
 
-def extract_attachments(message) -> list[dict]:
-    attachments = []
-    for i in range(message.number_of_attachments):
-        try:
-            att  = message.get_attachment(i)
-            name = safe_str(att.name) or f"attachment_{i}"
-            attachments.append({
-                "filename":     name,
-                "size":         att.size,
-                "content_type": safe_str(getattr(att, "mime_type", "")),
-            })
-        except Exception as e:
-            logging.warning(f"    Pièce jointe ignorée : {e}")
-    return attachments
-
-
-def index_email(message, pst_filename: str, folder_path: str, pst_acl) -> None:
-    subject      = safe_str(message.subject)
-    sender       = safe_str(message.sender_name)
-    sender_email = safe_str(message.sender_email_address)
-    body_text    = safe_str(message.plain_text_body)
-    body_html    = safe_str(message.html_body)
-
-    recipients = []
-    try:
-        for i in range(message.number_of_recipients):
-            r = message.get_recipient(i)
-            recipients.append({
-                "name":  safe_str(r.display_name),
-                "email": safe_str(r.email_address),
-            })
-    except Exception:
-        pass
-
-    unique_str = f"{subject}{sender_email}{message.delivery_time}"
+def index_email(email: dict, pst_filename: str, pst_acl) -> None:
+    unique_str = f"{email.get('subject','')}{email.get('sender_email','')}{email.get('date','')}"
     doc_id = hashlib.md5(unique_str.encode()).hexdigest()
 
     if es.exists(index=ES_INDEX, id=doc_id):
@@ -83,15 +54,15 @@ def index_email(message, pst_filename: str, folder_path: str, pst_acl) -> None:
         "filepath":        pst_filename,
         "extension":       ".pst",
         "type":            "email",
-        "folder":          folder_path,
-        "title":           subject,
-        "author":          sender,
-        "sender_email":    sender_email,
-        "recipients":      recipients,
-        "content":         body_text or body_html,
-        "attachments":     extract_attachments(message),
-        "has_attachments": message.number_of_attachments > 0,
-        "date":            format_date(message.delivery_time),
+        "folder":          email.get("folder", ""),
+        "title":           email.get("subject", ""),
+        "author":          email.get("sender", ""),
+        "sender_email":    email.get("sender_email", ""),
+        "recipients":      email.get("recipients", []),
+        "content":         email.get("body_text") or email.get("body_html") or "",
+        "attachments":     email.get("attachments", []),
+        "has_attachments": email.get("has_attachments", False),
+        "date":            email.get("date"),
         "indexed_at":      datetime.now(timezone.utc).isoformat(),
         "doc_hash":        doc_id,
         # ACL héritées du fichier PST source (un PST = une boîte mail = un propriétaire)
@@ -107,31 +78,53 @@ def index_email(message, pst_filename: str, folder_path: str, pst_acl) -> None:
     es.index(index=ES_INDEX, id=doc_id, document=doc)
 
 
-def walk_folder(folder, pst_filename: str, pst_acl, folder_path: str = "") -> None:
-    current_path = f"{folder_path}/{safe_str(folder.name)}"
-    logging.info(f"  📁 {current_path} ({folder.number_of_sub_messages} emails)")
-
-    for i in range(folder.number_of_sub_messages):
-        try:
-            message = folder.get_sub_message(i)
-            index_email(message, pst_filename, current_path, pst_acl)
-        except Exception as e:
-            logging.error(f"    [ERREUR] Email {i} : {e}")
-
-    for i in range(folder.number_of_sub_folders):
-        walk_folder(folder.get_sub_folder(i), pst_filename, pst_acl, current_path)
-
-
 def index_pst(pst_path: str) -> None:
-    """Indexe l'intégralité d'un fichier PST, ACL héritées du fichier source."""
+    """
+    Indexe l'intégralité d'un fichier PST, ACL héritées du fichier
+    source. La lecture réelle du PST (pypff) se fait dans un
+    sous-processus utilisant le Python système — voir l'en-tête de
+    ce fichier pour l'explication complète.
+    """
     logging.info(f"📂 Ouverture : {pst_path}")
 
-    # Les emails héritent des ACL du fichier .pst lui-même
     pst_acl = extract_acl(pst_path)
 
-    pst = pypff.file()
-    pst.open(pst_path)
-    walk_folder(pst.get_root_folder(), pst_path, pst_acl)
-    pst.close()
+    try:
+        proc = subprocess.run(
+            [SYSTEM_PYTHON, PST_WORKER, pst_path],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        logging.error(f"pst_worker.py a dépassé le délai (600s) pour {pst_path}")
+        return
+    except FileNotFoundError:
+        logging.error(
+            f"{SYSTEM_PYTHON} introuvable — vérifier que l'image contient "
+            f"bien le Python système Debian (dépendance de python3-pypff)."
+        )
+        return
 
-    logging.info(f"✅ PST indexé : {pst_path}")
+    if proc.returncode != 0:
+        logging.error(f"pst_worker.py a échoué ({pst_path}) : {proc.stderr.strip()[:500]}")
+        return
+
+    count = 0
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            email = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        try:
+            index_email(email, pst_path, pst_acl)
+            count += 1
+        except Exception as e:
+            logging.error(f"  [ERREUR] Email dans {pst_path} : {e}")
+
+    for err_line in proc.stderr.splitlines():
+        if err_line.strip():
+            logging.warning(f"  pst_worker: {err_line.strip()[:300]}")
+
+    logging.info(f"✅ PST indexé : {pst_path} ({count} email(s))")
