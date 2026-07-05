@@ -22,4 +22,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t docsearch-ingestion:ci .
-      - run: docker run --rm docsearch-ingestion:ci python3 -c "import pff; print('libpff OK')"
+      - run: docker run --rm docsearch-ingestion:ci python3 -c "import pypff; print('pypff OK')"

@@ -332,5 +332,6 @@ son README pour le déploiement complet.
   suppression et la détection de doublons.
 - **CIFS/NFS** : le watcher utilise `PollingObserver`, pas `Observer`
   (inotify ne fonctionne pas sur les montages réseau).
-- **PST** : `pst_extractor.py` importe `pff` (paquet apt `python3-libpff`),
-  jamais `pypff` (non publié sur PyPI).
+- **PST** : `pst_extractor.py` importe `pypff` (paquet apt
+  `python3-pypff` — attention, PAS `python3-libpff`, qui n'existe pas
+  et jamais publié sur PyPI non plus).

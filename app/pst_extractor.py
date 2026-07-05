@@ -10,13 +10,11 @@ import hashlib
 import logging
 from datetime import datetime, timezone
 
-# python3-libpff (paquet apt Debian/Ubuntu) expose le module "pff"
-# et non "pypff". Si vous compilez libpff depuis les sources,
-# le module s'appelle "pypff" — adapter l'import en conséquence.
-try:
-    import pff as pypff          # apt : python3-libpff
-except ImportError:
-    import pypff                 # compilation depuis les sources
+# Le paquet apt Debian/Ubuntu s'appelle python3-pypff (PAS
+# python3-libpff, qui n'existe pas) et fournit le module "pypff" —
+# confirmé via le nom du répertoire source du binding (pypff_message.h,
+# pypff_file_types.h, etc. dans le paquet source "libpff").
+import pypff
 
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl

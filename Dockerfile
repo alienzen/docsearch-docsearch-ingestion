@@ -1,21 +1,23 @@
 # ── docsearch-ingestion — Image Python ────────────────────────
 # Indexation initiale, workers Kafka, watcher (surveillance dossier)
-# Python 3.12 · libpff via apt (extraction PST) · ACL POSIX
+# Python 3.12 · pypff via apt (extraction PST) · ACL POSIX
 
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # ACL étendues POSIX (getfacl / setfacl)
     acl \
-    # Binding Python pour libpff (archives PST Outlook) — disponible
-    # directement via apt sur Debian 12, jamais publié sur PyPI
-    python3-libpff \
+    # Binding Python pour libpff (archives PST Outlook) — le paquet
+    # s'appelle python3-pypff (PAS python3-libpff, qui n'existe pas),
+    # disponible directement via apt sur Debian 12, jamais publié sur
+    # PyPI. Module Python fourni : "pypff" (voir vérification ci-dessous).
+    python3-pypff \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Vérification que le module pff (libpff) est bien disponible
-RUN python3 -c "import pff; print('libpff OK')"
+# Vérification que le module pypff est bien disponible
+RUN python3 -c "import pypff; print('pypff OK')"
 
 WORKDIR /app
 
