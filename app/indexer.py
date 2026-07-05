@@ -3,6 +3,7 @@
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
+ES_INDEX = os.getenv("ES_INDEX", "documents")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
@@ -109,8 +110,8 @@ def create_index():
             }
         }
     }
-    if not es.indices.exists(index="documents"):
-        es.indices.create(index="documents", body=mapping)
+    if not es.indices.exists(index=ES_INDEX):
+        es.indices.create(index=ES_INDEX, body=mapping)
         logging.info("Index 'documents' créé avec support ACL.")
 
 
@@ -171,7 +172,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
     extraire le contenu (peut différer de `identity`).
     """
     doc_id = file_hash(identity)
-    if es.exists(index="documents", id=doc_id):
+    if es.exists(index=ES_INDEX, id=doc_id):
         logging.info(f"  [SKIP] {identity}")
         return
 
@@ -198,7 +199,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
             "permissions": acl.permissions,
         },
     }
-    es.index(index="documents", id=doc_id, document=doc)
+    es.index(index=ES_INDEX, id=doc_id, document=doc)
 
 
 def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: int = 0):
@@ -291,7 +292,7 @@ def index_file(filepath: str):
 
 
 def optimize_for_bulk():
-    es.indices.put_settings(index="documents", settings={
+    es.indices.put_settings(index=ES_INDEX, settings={
         "index": {
             "refresh_interval":    "-1",
             "number_of_replicas":  "0",
@@ -302,13 +303,13 @@ def optimize_for_bulk():
 
 
 def restore_after_bulk():
-    es.indices.put_settings(index="documents", settings={
+    es.indices.put_settings(index=ES_INDEX, settings={
         "index": {
             "refresh_interval":   "30s",
             "number_of_replicas": "1",
         }
     })
-    es.indices.forcemerge(index="documents", max_num_segments=5)
+    es.indices.forcemerge(index=ES_INDEX, max_num_segments=5)
     logging.info("✅ Index restauré.")
 
 

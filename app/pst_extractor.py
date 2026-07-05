@@ -3,6 +3,7 @@
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
+ES_INDEX = os.getenv("ES_INDEX", "documents")
 DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
 import hashlib
@@ -76,7 +77,7 @@ def index_email(message, pst_filename: str, folder_path: str, pst_acl) -> None:
     unique_str = f"{subject}{sender_email}{message.delivery_time}"
     doc_id = hashlib.md5(unique_str.encode()).hexdigest()
 
-    if es.exists(index="documents", id=doc_id):
+    if es.exists(index=ES_INDEX, id=doc_id):
         return
 
     doc = {
@@ -105,7 +106,7 @@ def index_email(message, pst_filename: str, folder_path: str, pst_acl) -> None:
             "permissions": pst_acl.permissions,
         },
     }
-    es.index(index="documents", id=doc_id, document=doc)
+    es.index(index=ES_INDEX, id=doc_id, document=doc)
 
 
 def walk_folder(folder, pst_filename: str, pst_acl, folder_path: str = "") -> None:

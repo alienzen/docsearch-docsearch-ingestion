@@ -20,7 +20,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, is_excluded, index_archive
+from indexer import get_author, get_title, is_excluded, index_archive, ES_INDEX
 from archive_extractor import is_archive
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -60,7 +60,7 @@ def build_action(filepath: str, content: str, metadata: dict, extension: str) ->
 
     return {
         "_op_type": "index",
-        "_index":   "documents",
+        "_index":   ES_INDEX,
         "_id":      doc_id,
         "_source": {
             "filename":   path.name,
@@ -158,7 +158,7 @@ def run_worker(batch_size: int = BATCH):
                         continue
 
                     doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
-                    if es.exists(index="documents", id=doc_id):
+                    if es.exists(index=ES_INDEX, id=doc_id):
                         logging.debug(f"[SKIP] Déjà indexé : {filepath}")
                         continue
 

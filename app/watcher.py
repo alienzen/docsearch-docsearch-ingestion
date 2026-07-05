@@ -15,7 +15,7 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, is_excluded
+from indexer import index_file, is_excluded, ES_INDEX
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
@@ -54,7 +54,7 @@ def delete_from_index(filepath: str):
     normalized = str(Path(filepath).resolve())
     doc_id     = hashlib.md5(normalized.encode()).hexdigest()
     try:
-        es.delete(index="documents", id=doc_id, refresh=True)
+        es.delete(index=ES_INDEX, id=doc_id, refresh=True)
         logging.info(f"🗑️  Supprimé de l'index : {normalized}")
     except Exception as e:
         if "NotFoundError" in type(e).__name__ or "404" in str(e):
@@ -65,7 +65,7 @@ def delete_from_index(filepath: str):
     if is_archive(Path(filepath)):
         try:
             res = es.delete_by_query(
-                index="documents",
+                index=ES_INDEX,
                 query={"wildcard": {"filepath": f"{normalized}::*"}},
                 refresh=True,
             )
@@ -84,7 +84,7 @@ def update_acl_only(filepath: str):
         doc_id = file_hash(filepath)
         acl    = extract_acl(filepath)
         es.update(
-            index="documents",
+            index=ES_INDEX,
             id=doc_id,
             doc={
                 "acl": {
@@ -107,7 +107,7 @@ def get_indexed_acl(filepath: str) -> dict | None:
     """Récupère les ACL actuellement indexées pour un fichier."""
     try:
         doc_id = file_hash(filepath)
-        res    = es.get(index="documents", id=doc_id, source=["acl"])
+        res    = es.get(index=ES_INDEX, id=doc_id, source=["acl"])
         return res["_source"].get("acl")
     except Exception:
         return None
@@ -127,7 +127,7 @@ def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bo
     old_id = hashlib.md5(old_identity.encode()).hexdigest()
     new_id = hashlib.md5(new_identity.encode()).hexdigest()
     try:
-        old_doc = es.get(index="documents", id=old_id)["_source"]
+        old_doc = es.get(index=ES_INDEX, id=old_id)["_source"]
     except Exception:
         return False
 
@@ -143,8 +143,8 @@ def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bo
             "permissions": updated_acl.permissions,
         }
 
-    es.index(index="documents", id=new_id, document=new_doc)
-    es.delete(index="documents", id=old_id, refresh=True)
+    es.index(index=ES_INDEX, id=new_id, document=new_doc)
+    es.delete(index=ES_INDEX, id=old_id, refresh=True)
     return True
 
 
@@ -172,7 +172,7 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
     }
     renamed = 0
     try:
-        resp = es.search(index="documents", query=query, size=1000)
+        resp = es.search(index=ES_INDEX, query=query, size=1000)
     except Exception as e:
         logging.error(f"Erreur recherche pour renommage de préfixe : {e}")
         return 0
@@ -185,14 +185,14 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
         doc["filepath"] = new_path
         new_id = hashlib.md5(new_path.encode()).hexdigest()
         try:
-            es.index(index="documents", id=new_id, document=doc)
-            es.delete(index="documents", id=old_id)
+            es.index(index=ES_INDEX, id=new_id, document=doc)
+            es.delete(index=ES_INDEX, id=old_id)
             renamed += 1
         except Exception as e:
             logging.error(f"Erreur renommage ({old_path} -> {new_path}) : {e}")
 
     if renamed:
-        es.indices.refresh(index="documents")
+        es.indices.refresh(index=ES_INDEX)
     return renamed
 
 
@@ -201,7 +201,7 @@ def _rename_archive_members(old_root: str, new_root: str, updated_acl=None) -> i
     query = {"prefix": {"filepath": f"{old_root}::"}}
     renamed = 0
     try:
-        resp = es.search(index="documents", query=query, size=1000)
+        resp = es.search(index=ES_INDEX, query=query, size=1000)
     except Exception as e:
         logging.error(f"Erreur recherche membres d'archive : {e}")
         return 0
@@ -223,14 +223,14 @@ def _rename_archive_members(old_root: str, new_root: str, updated_acl=None) -> i
             }
         new_id = hashlib.md5(new_identity.encode()).hexdigest()
         try:
-            es.index(index="documents", id=new_id, document=doc)
-            es.delete(index="documents", id=old_id)
+            es.index(index=ES_INDEX, id=new_id, document=doc)
+            es.delete(index=ES_INDEX, id=old_id)
             renamed += 1
         except Exception as e:
             logging.error(f"Erreur renommage membre ({old_id}) : {e}")
 
     if renamed:
-        es.indices.refresh(index="documents")
+        es.indices.refresh(index=ES_INDEX)
     return renamed
 
 
