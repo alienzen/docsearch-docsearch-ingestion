@@ -10,6 +10,7 @@ DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 import time
 import logging
 import hashlib
+import json
 from pathlib import Path
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
@@ -20,6 +21,24 @@ from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
 from path_filter import is_path_allowed
+
+# ── Battement de cœur (pour le panneau d'administration) ──────
+# Écrit l'heure du dernier cycle de surveillance dans Redis, afin que
+# docsearch-api puisse détecter un watcher figé/planté sans avoir
+# besoin d'un accès Docker (voir /admin/status côté docsearch-api).
+HEARTBEAT_KEY = "docsearch:heartbeat:watcher"
+
+def _write_heartbeat():
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "redis"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        client.set(HEARTBEAT_KEY, json.dumps({"ts": time.time()}), ex=120)
+    except Exception as e:
+        logging.debug(f"[heartbeat] Redis injoignable : {e}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -445,6 +464,7 @@ def start_watcher(folder_path: str, recursive: bool = True):
     try:
         while True:
             time.sleep(5)
+            _write_heartbeat()
             new_interval = get_param("watcher_poll_interval")
             if new_interval != current_interval:
                 logging.info(
