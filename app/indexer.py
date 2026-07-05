@@ -18,6 +18,7 @@ from acl_extractor import extract_acl
 from archive_extractor import (
     is_archive, safe_extract_archive, ArchiveExtractionError, ARCHIVE_MAX_DEPTH
 )
+from filetype_config import is_allowed, get_enabled_extensions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +35,10 @@ es = Elasticsearch(
     request_timeout=60,
 )
 
+# Les extensions/tailles autorisées sont maintenant configurables à chaud
+# via filetype_config.py (Redis) — voir is_allowed() et get_enabled_extensions().
+# SUPPORTED est conservé UNIQUEMENT pour compatibilité avec du code externe
+# qui l'importerait encore ; préférer get_enabled_extensions() désormais.
 SUPPORTED = {".doc", ".docx", ".ppt", ".pptx",
              ".xls", ".xlsx", ".txt", ".pdf", ".pst"}
 
@@ -228,7 +233,10 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: in
                 continue
 
             extension = real_path.suffix.lower()
-            if extension not in SUPPORTED:
+            size = real_path.stat().st_size
+            allowed, reason = is_allowed(extension, size)
+            if not allowed:
+                logging.info(f"  [IGNORÉ] {identity} — {reason}")
                 continue
 
             _index_document(
@@ -237,7 +245,7 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: in
                 filename=real_path.name,
                 extension=extension,
                 acl=acl,
-                size=real_path.stat().st_size,
+                size=size,
                 doc_type="archive_member",
             )
 
@@ -262,7 +270,11 @@ def index_file(filepath: str):
         index_archive(filepath)
         return
 
-    if path.suffix.lower() not in SUPPORTED:
+    extension = path.suffix.lower()
+    size = path.stat().st_size
+    allowed, reason = is_allowed(extension, size)
+    if not allowed:
+        logging.info(f"  [IGNORÉ] {path.name} — {reason}")
         return
 
     identity = str(path.resolve())

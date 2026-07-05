@@ -15,8 +15,9 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, SUPPORTED, is_excluded
+from indexer import index_file, is_excluded
 from archive_extractor import is_archive
+from filetype_config import get_enabled_extensions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,7 +237,12 @@ class DocumentHandler(FileSystemEventHandler):
 
     def _is_supported(self, path):
         p = Path(path)
-        return p.suffix.lower() in SUPPORTED or is_archive(p)
+        # Pré-filtre rapide (extension seule) — le contrôle définitif
+        # (extension + taille) est fait dans index_file() → is_allowed().
+        # Séparé ainsi car ce pré-filtre sert aussi pour is_archive(),
+        # qui n'a pas de notion de "taille max" au niveau du fichier
+        # archive lui-même (ses membres sont vérifiés individuellement).
+        return p.suffix.lower() in get_enabled_extensions() or is_archive(p)
 
     def _is_temp(self, path):
         # is_excluded (indexer.py) exclut tout fichier commençant par

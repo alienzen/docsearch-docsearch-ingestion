@@ -29,8 +29,9 @@ from pathlib import Path
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
-from indexer import SUPPORTED, is_excluded, create_index, es
+from indexer import is_excluded, create_index, es
 from archive_extractor import is_archive
+from filetype_config import is_allowed
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +74,17 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
             extension = path.suffix.lower()
             archive = is_archive(path)
 
-            if not archive and extension not in SUPPORTED:
-                skipped += 1
-                continue
+            if not archive:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    skipped += 1
+                    continue
+                allowed, reason = is_allowed(extension, size)
+                if not allowed:
+                    logging.debug(f"[IGNORÉ] {filepath} — {reason}")
+                    skipped += 1
+                    continue
 
             message = {
                 "filepath":  str(path.resolve()),

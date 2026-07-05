@@ -135,6 +135,40 @@ justifier la complexité d'une file de messages. Le pipeline
 producer/workers est réservé aux gros volumes (indexation initiale,
 réindexation complète).
 
+## Configuration dynamique des types de fichiers
+
+Les extensions indexées et leur taille maximale sont modifiables à
+chaud (Redis), **sans redémarrer** `producer.py`, `worker.py` ni
+`watcher.py` :
+
+```bash
+# Depuis docsearch-infra :
+./manage.sh get-filetypes
+./manage.sh set-filetype jpg --enabled true --max-size 5
+./manage.sh set-filetype pdf --max-size 100
+./manage.sh set-filetype docx --enabled false
+```
+
+Le changement est pris en compte dans un délai maximal de
+`FILETYPE_CONFIG_CACHE_TTL` secondes (10s par défaut) par tous les
+conteneurs déjà démarrés — chacun relit Redis périodiquement plutôt
+qu'une seule fois au démarrage.
+
+**Où le contrôle s'applique** (voir `filetype_config.py`) :
+- `producer.py` : avant publication sur Kafka (évite de publier des
+  messages pour des fichiers qui seront rejetés de toute façon)
+- `worker.py` : re-vérifié avant l'appel Tika (le plus coûteux à éviter)
+- `indexer.py` (`index_file`, `_process_archive`) : contrôle définitif,
+  point d'entrée commun utilisé aussi par `watcher.py`
+- Chaque **membre d'archive** est vérifié individuellement (une archive
+  peut contenir un fichier trop volumineux même si l'archive entière
+  passe la limite globale `ARCHIVE_MAX_TOTAL_SIZE_MB`)
+
+**Résilience** : si Redis est injoignable, repli automatique sur une
+configuration par défaut codée en dur (`DEFAULT_CONFIG` dans
+`filetype_config.py`) — l'ingestion ne s'arrête jamais pour un problème
+de configuration.
+
 ## Renommage/déplacement — pas de réextraction Tika
 
 Renommer un fichier ou un **dossier entier** ne relance jamais Tika :

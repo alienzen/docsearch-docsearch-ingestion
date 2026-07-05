@@ -20,8 +20,9 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, SUPPORTED, is_excluded, index_archive
+from indexer import get_author, get_title, is_excluded, index_archive
 from archive_extractor import is_archive
+from filetype_config import is_allowed
 
 # Flush du buffer bulk() même si WORKER_BATCH_SIZE n'est pas atteint —
 # indispensable pour les petits volumes (le buffer ne se viderait
@@ -142,7 +143,13 @@ def run_worker(batch_size: int = BATCH):
                             logging.error(f"Erreur archive [{filepath}] : {e}")
                         continue
 
-                    if extension not in SUPPORTED:
+                    try:
+                        size = Path(filepath).stat().st_size
+                    except OSError:
+                        continue
+                    allowed, reason = is_allowed(extension, size)
+                    if not allowed:
+                        logging.info(f"[IGNORÉ] {filepath} — {reason}")
                         continue
 
                     doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
