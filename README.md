@@ -335,3 +335,16 @@ son README pour le déploiement complet.
 - **PST** : `pst_extractor.py` importe `pypff` (paquet apt
   `python3-pypff` — attention, PAS `python3-libpff`, qui n'existe pas
   et jamais publié sur PyPI non plus).
+- **Tika — deux appels séparés, jamais `service="all"`** : `extract_text()`
+  (indexer.py) et `extract()` (worker.py) appellent Tika avec
+  `service="text"` puis `service="meta"` séparément. `service="all"`
+  (le défaut si on omet le paramètre) interroge `/rmeta`, qui retourne
+  les métadonnées de façon **récursive** — document principal + chaque
+  ressource interne du conteneur (ex: la vignette `docProps/thumbnail.jpeg`
+  incluse dans la plupart des `.docx`). Le client `tika-python` fusionne
+  ensuite tout dans un seul dict, et la vignette (traitée après le
+  document principal) peut écraser le vrai titre par son propre nom de
+  ressource — symptôme observé : `title` = `/docProps/thumbnail.jpeg`
+  pour tous les `.docx`. `service="meta"` (`/meta`) ne renvoie que les
+  métadonnées du document principal, sans récursion — bug éliminé à la
+  racine. Référence : https://github.com/chrismattmann/tika-python/issues/62

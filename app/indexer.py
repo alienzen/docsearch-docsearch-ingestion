@@ -120,10 +120,34 @@ def create_index():
 
 
 def extract_text(filepath: str) -> tuple[str, dict]:
+    """
+    Deux appels séparés à Tika plutôt qu'un seul service="all" :
+
+    "all" interroge /rmeta, qui retourne les métadonnées de façon
+    RÉCURSIVE — document principal ET chaque ressource interne du
+    conteneur (ex: la vignette docProps/thumbnail.jpeg incluse dans
+    la plupart des .docx). Le client tika-python fusionne ensuite tout
+    dans un seul dict, et la vignette (traitée après le document
+    principal dans le flux récursif) écrase le vrai titre par son
+    propre nom de ressource — d'où un "title" valant littéralement
+    "/docProps/thumbnail.jpeg" pour tous les .docx, bug déjà constaté
+    et documenté : https://github.com/chrismattmann/tika-python/issues/62
+
+    service="meta" interroge /meta (métadonnées du document PRINCIPAL
+    uniquement, sans récursion dans les ressources internes) — élimine
+    le problème à la racine. service="text" pour le contenu, via /tika.
+
+    Coût : deux requêtes HTTP vers Tika au lieu d'une — accepté en
+    échange de métadonnées fiables (le même bug de fusion récursive
+    pouvait aussi corrompre author/date de la même façon).
+    """
     import random
     server = random.choice(TIKA_SERVERS)
-    parsed = tika_parser.from_file(filepath, serverEndpoint=server)
-    return (parsed.get("content") or "").strip(), (parsed.get("metadata") or {})
+    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text")
+    metadata_result = tika_parser.from_file(filepath, serverEndpoint=server, service="meta")
+    content  = (content_result.get("content") or "").strip()
+    metadata = metadata_result.get("metadata") or {}
+    return content, metadata
 
 
 def get_author(metadata: dict) -> str:

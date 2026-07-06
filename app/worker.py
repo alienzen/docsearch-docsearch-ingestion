@@ -46,9 +46,16 @@ es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeou
 
 
 def extract(filepath: str) -> tuple[str, dict]:
+    """Voir indexer.py:extract_text() pour l'explication complète —
+    deux appels séparés (service="text" / service="meta") pour éviter
+    que les métadonnées des ressources internes (ex: vignette d'un
+    .docx) n'écrasent celles du document principal."""
     server = random.choice(TIKA_SVRS)
-    parsed = tika_parser.from_file(filepath, serverEndpoint=server)
-    return (parsed.get("content") or "").strip(), (parsed.get("metadata") or {})
+    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text")
+    metadata_result = tika_parser.from_file(filepath, serverEndpoint=server, service="meta")
+    content  = (content_result.get("content") or "").strip()
+    metadata = metadata_result.get("metadata") or {}
+    return content, metadata
 
 
 def build_action(filepath: str, content: str, metadata: dict, extension: str) -> dict:
