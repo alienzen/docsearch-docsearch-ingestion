@@ -61,7 +61,8 @@ def create_index():
                 "title":       {"type": "text"},
                 "author":      {"type": "keyword"},
                 "size":        {"type": "long"},
-                "date":        {"type": "date"},
+                "date_created":  {"type": "date"},
+                "date_modified": {"type": "date"},
                 "indexed_at":  {"type": "date"},
                 "doc_hash":    {"type": "keyword"},
                 # ── Champs ACL ───────────────────────────
@@ -138,21 +139,31 @@ def get_title(metadata: dict, fallback: str) -> str:
     return metadata.get("dc:title") or metadata.get("office:title") or fallback
 
 
-def get_date(metadata: dict, fallback_path: Path | None = None) -> str | None:
-    """
-    Détermine la date du document à partir des métadonnées Tika
-    (priorité : date de création, puis dernière modification). Certains
-    formats (.txt notamment) n'ont aucune métadonnée de date exploitable
-    — repli sur la date de modification du fichier sur le disque dans
-    ce cas.
-    """
-    for key in ("dcterms:created", "Creation-Date", "meta:creation-date",
-                "dcterms:modified", "Last-Modified", "meta:save-date"):
+def _first_metadata_value(metadata: dict, keys: tuple[str, ...]) -> str | None:
+    for key in keys:
         value = metadata.get(key)
         if value:
-            if isinstance(value, list):
-                value = value[0]
-            return value
+            return value[0] if isinstance(value, list) else value
+    return None
+
+
+def get_date_created(metadata: dict, fallback_path: Path | None = None) -> str | None:
+    """
+    Date de CRÉATION du document, à partir des métadonnées Tika.
+
+    ⚠️ Repli sur le système de fichiers : sous Linux, il n'existe pas de
+    date de création fiable au niveau de la plupart des systèmes de
+    fichiers (contrairement à Windows/macOS) — st_ctime ne représente
+    PAS la date de création mais la date de dernier changement de
+    métadonnées (permissions, renommage...), ce qui la rendrait
+    trompeuse. Le repli utilise donc st_mtime (comme get_date_modified)
+    plutôt que d'inventer une date de création fictive — mieux vaut une
+    valeur honnête (identique à la date de modification) qu'une fausse
+    précision.
+    """
+    value = _first_metadata_value(metadata, ("dcterms:created", "Creation-Date", "meta:creation-date"))
+    if value:
+        return value
 
     if fallback_path is not None:
         try:
@@ -161,7 +172,24 @@ def get_date(metadata: dict, fallback_path: Path | None = None) -> str | None:
             ).isoformat()
         except OSError:
             pass
+    return None
 
+
+def get_date_modified(metadata: dict, fallback_path: Path | None = None) -> str | None:
+    """Date de DERNIÈRE MODIFICATION du document, à partir des métadonnées
+    Tika, avec repli sur la date de modification du fichier sur le
+    disque (st_mtime, fiable sur Linux) si absente des métadonnées."""
+    value = _first_metadata_value(metadata, ("dcterms:modified", "Last-Modified", "meta:save-date"))
+    if value:
+        return value
+
+    if fallback_path is not None:
+        try:
+            return datetime.fromtimestamp(
+                fallback_path.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+        except OSError:
+            pass
     return None
 
 
@@ -246,7 +274,8 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         "content":    content,
         "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
-        "date":       get_date(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
+        "date_created":  get_date_created(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
+        "date_modified": get_date_modified(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
         "folder":     folder,
         "folder_top": folder_top,
         "size":       size,
