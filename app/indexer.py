@@ -84,6 +84,7 @@ def create_index():
                 },
                 # ── Champs PST ───────────────────────────
                 "folder":          {"type": "keyword"},
+                "folder_top":      {"type": "keyword"},
                 "sender_email":    {"type": "keyword"},
                 "has_attachments": {"type": "boolean"},
                 "recipients": {
@@ -137,6 +138,61 @@ def get_title(metadata: dict, fallback: str) -> str:
     return metadata.get("dc:title") or metadata.get("office:title") or fallback
 
 
+def get_date(metadata: dict, fallback_path: Path | None = None) -> str | None:
+    """
+    Détermine la date du document à partir des métadonnées Tika
+    (priorité : date de création, puis dernière modification). Certains
+    formats (.txt notamment) n'ont aucune métadonnée de date exploitable
+    — repli sur la date de modification du fichier sur le disque dans
+    ce cas.
+    """
+    for key in ("dcterms:created", "Creation-Date", "meta:creation-date",
+                "dcterms:modified", "Last-Modified", "meta:save-date"):
+        value = metadata.get(key)
+        if value:
+            if isinstance(value, list):
+                value = value[0]
+            return value
+
+    if fallback_path is not None:
+        try:
+            return datetime.fromtimestamp(
+                fallback_path.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+        except OSError:
+            pass
+
+    return None
+
+
+def compute_folder_fields(identity: str) -> tuple[str, str]:
+    """
+    Retourne (folder, folder_top) à partir de l'identité d'un document :
+    - folder     : chemin du dossier complet, relatif à DOCS_FOLDER —
+                   utilisé pour un filtrage précis (un sous-dossier
+                   exact ou toute son arborescence)
+    - folder_top : premier segment seul — utilisé pour la facette
+                   (nombre de valeurs distinctes raisonnable, même sur
+                   un corpus de plusieurs millions de documents)
+
+    Pour un membre d'archive ("archive.zip::membre"), c'est le dossier
+    de L'ARCHIVE elle-même qui compte — cohérent avec path_filter.py
+    et purge_path(), qui ne portent jamais sur le chemin interne d'un
+    membre.
+    """
+    archive_part = identity.split("::", 1)[0]
+    docs_root = Path(DOCS_FOLDER).resolve()
+
+    try:
+        rel_dir = Path(archive_part).resolve().parent.relative_to(docs_root)
+        folder = "" if str(rel_dir) == "." else str(rel_dir)
+    except ValueError:
+        folder = str(Path(archive_part).parent)
+
+    folder_top = folder.split("/")[0] if folder else ""
+    return folder, folder_top
+
+
 def file_hash(identity: str) -> str:
     """
     Hash de l'identité du document — reproductible même après suppression
@@ -180,6 +236,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
 
     logging.info(f"  [INDEX] {identity}")
     content, metadata = extract_text(str(tika_path))
+    folder, folder_top = compute_folder_fields(identity)
 
     doc = {
         "filename":   filename,
@@ -189,6 +246,9 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         "content":    content,
         "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
+        "date":       get_date(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
+        "folder":     folder,
+        "folder_top": folder_top,
         "size":       size,
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "doc_hash":   doc_id,
