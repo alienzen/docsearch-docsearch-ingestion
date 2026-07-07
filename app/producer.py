@@ -23,16 +23,20 @@ DOCS_FOLDER     = os.getenv("DOCS_FOLDER", "/documents")
 KAFKA_TOPIC     = os.getenv("KAFKA_TOPIC", "documents-to-index")
 
 import json
+import time
 import logging
 from pathlib import Path
 
-from kafka import KafkaProducer
+from kafka import KafkaProducer, KafkaConsumer, TopicPartition
+from kafka.admin import KafkaAdminClient
 from kafka.errors import KafkaError
 
-from indexer import is_excluded, create_index, es
+from indexer import is_excluded, create_index, optimize_for_bulk, restore_after_bulk, es
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded
+
+KAFKA_WORKER_GROUP = "indexer-workers"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -138,6 +142,44 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
     return published, skipped
 
 
+def wait_for_workers_to_catch_up(poll_interval: int = 10) -> None:
+    """
+    Bloque jusqu'à ce que le groupe de workers ait consommé tout le
+    backlog Kafka publié par ce scan — la publication elle-même est
+    rapide, le vrai travail (Tika + indexation ES) se fait ensuite en
+    arrière-plan dans les workers. Nécessaire pour ne réactiver replicas
+    et refresh_interval (restore_after_bulk) qu'une fois l'indexation
+    réellement terminée, jamais juste après la publication sur Kafka.
+    """
+    consumer = KafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP)
+    partitions = consumer.partitions_for_topic(KAFKA_TOPIC) or set()
+    tps = [TopicPartition(KAFKA_TOPIC, p) for p in partitions]
+    if not tps:
+        consumer.close()
+        return
+    consumer.assign(tps)
+    admin = KafkaAdminClient(bootstrap_servers=KAFKA_BOOTSTRAP)
+
+    logging.info("⏳ Attente de la consommation complète par les workers...")
+    try:
+        while True:
+            end_offsets = consumer.end_offsets(tps)
+            committed = admin.list_consumer_group_offsets(group_id=KAFKA_WORKER_GROUP)
+            lag = 0
+            for tp in tps:
+                offset_meta = committed.get(tp)
+                consumed = offset_meta.offset if offset_meta and offset_meta.offset >= 0 else 0
+                lag += end_offsets[tp] - consumed
+            if lag <= 0:
+                break
+            logging.info(f"  ... {lag} message(s) restant(s) à traiter par les workers")
+            time.sleep(poll_interval)
+    finally:
+        consumer.close()
+        admin.close()
+    logging.info("✅ Backlog Kafka entièrement consommé par les workers.")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -166,8 +208,17 @@ if __name__ == "__main__":
 
     logging.info(f"📂 Scan de {target_folder}...")
     create_index()   # s'assure que le mapping ES existe avant tout traitement
-    published, skipped = scan_and_produce(target_folder)
-    logging.info(
-        f"✅ {published} fichier(s) publié(s) sur Kafka ({KAFKA_TOPIC}), "
-        f"{skipped} ignoré(s). Les workers vont maintenant les traiter en parallèle."
-    )
+    optimize_for_bulk()
+    try:
+        published, skipped = scan_and_produce(target_folder)
+        logging.info(
+            f"✅ {published} fichier(s) publié(s) sur Kafka ({KAFKA_TOPIC}), "
+            f"{skipped} ignoré(s). Les workers vont maintenant les traiter en parallèle."
+        )
+        wait_for_workers_to_catch_up()
+    finally:
+        # Toujours restaurer, même si le scan ou l'attente échoue — un
+        # index laissé avec 0 replica / refresh désactivé est un risque
+        # en production (perte de tolérance de panne, résultats non à
+        # jour), pas seulement une perte de performance.
+        restore_after_bulk()
