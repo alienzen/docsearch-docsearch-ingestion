@@ -54,7 +54,15 @@ def create_index():
         "mappings": {
             "properties": {
                 "filename":    {"type": "keyword"},
-                "filepath":    {"type": "keyword"},
+                "filepath":    {
+                    "type": "keyword",
+                    # Même principe que author.text : filepath reste en
+                    # keyword (nécessaire pour is_path_allowed, purge_path
+                    # et l'affichage exact), filepath.text devient
+                    # cherchable en texte libre (ex: "rapport" trouve
+                    # /documents/Finance/rapport_2023.pdf).
+                    "fields": {"text": {"type": "text"}},
+                },
                 "extension":   {"type": "keyword"},
                 "type":        {"type": "keyword"},
                 "content":     {"type": "text", "analyzer": "french"},
