@@ -20,7 +20,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, is_excluded, index_archive, ES_INDEX
+from indexer import get_author, get_title, is_excluded, index_archive, ES_INDEX, get_date_created, get_date_modified, compute_folder_fields
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -59,26 +59,37 @@ def extract(filepath: str) -> tuple[str, dict]:
 
 
 def build_action(filepath: str, content: str, metadata: dict, extension: str) -> dict:
-    path   = Path(filepath)
-    doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
+    path     = Path(filepath)
+    identity = str(Path(filepath).resolve())
+    doc_id   = hashlib.md5(identity.encode()).hexdigest()
 
     # Extraction ACL
     acl = extract_acl(filepath)
+
+    # date_created/date_modified/folder/folder_top : mêmes fonctions que
+    # indexer.py (_index_document) — ce fichier construit son propre
+    # document ES séparément (bulk via le pipeline producer/workers) et
+    # ces champs y avaient été oubliés lors de leur ajout initial.
+    folder, folder_top = compute_folder_fields(identity)
 
     return {
         "_op_type": "index",
         "_index":   ES_INDEX,
         "_id":      doc_id,
         "_source": {
-            "filename":   path.name,
-            "filepath":   str(Path(filepath).resolve()),
-            "extension":  extension,
-            "type":       "document",
-            "content":    content,
-            "title":      get_title(metadata, path.stem),
-            "author":     get_author(metadata),
-            "size":       path.stat().st_size,
-            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "filename":       path.name,
+            "filepath":       identity,
+            "extension":      extension,
+            "type":           "document",
+            "content":        content,
+            "title":          get_title(metadata, path.stem),
+            "author":         get_author(metadata),
+            "date_created":   get_date_created(metadata, fallback_path=path if path.exists() else None),
+            "date_modified":  get_date_modified(metadata, fallback_path=path if path.exists() else None),
+            "folder":         folder,
+            "folder_top":     folder_top,
+            "size":           path.stat().st_size,
+            "indexed_at":     datetime.now(timezone.utc).isoformat(),
             "acl": {
                 "owner":       acl.owner,
                 "group":       acl.group,
