@@ -59,7 +59,14 @@ def create_index():
                 "type":        {"type": "keyword"},
                 "content":     {"type": "text", "analyzer": "french"},
                 "title":       {"type": "text"},
-                "author":      {"type": "keyword"},
+                "author":      {
+                    "type": "keyword",
+                    # Sous-champ analysé — permet une recherche en texte
+                    # libre partielle ("Dupont" trouve "Martin Dupont"),
+                    # tout en gardant "author" en keyword pour le filtre
+                    # exact utilisé par les facettes/chips de l'interface.
+                    "fields": {"text": {"type": "text"}},
+                },
                 "size":        {"type": "long"},
                 "date_created":  {"type": "date"},
                 "date_modified": {"type": "date"},
