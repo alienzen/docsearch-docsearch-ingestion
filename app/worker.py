@@ -177,7 +177,7 @@ def run_worker(batch_size: int = BATCH):
                             size = Path(filepath).stat().st_size
                         except OSError:
                             continue
-                        allowed, reason = is_allowed(kind, size)
+                        allowed, reason = is_allowed(kind, size, source.name)
                         if not allowed:
                             logging.info(f"[IGNORÉ] {filepath} — {reason}")
                             continue
@@ -196,7 +196,7 @@ def run_worker(batch_size: int = BATCH):
                         size = Path(filepath).stat().st_size
                     except OSError:
                         continue
-                    allowed, reason = is_allowed(extension, size)
+                    allowed, reason = is_allowed(extension, size, source.name)
                     if not allowed:
                         logging.info(f"[IGNORÉ] {filepath} — {reason}")
                         continue

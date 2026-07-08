@@ -301,7 +301,7 @@ class DocumentHandler(FileSystemEventHandler):
         # Séparé ainsi car ce pré-filtre sert aussi pour is_archive(),
         # qui n'a pas de notion de "taille max" au niveau du fichier
         # archive lui-même (ses membres sont vérifiés individuellement).
-        return p.suffix.lower() in get_enabled_extensions() or is_archive(p)
+        return p.suffix.lower() in get_enabled_extensions(self.source.name) or is_archive(p)
 
     def _is_temp(self, path):
         # is_excluded (indexer.py) exclut tout fichier commençant par

@@ -124,7 +124,7 @@ def scan_and_produce(folder_path: str, source: Source) -> tuple[int, int]:
             # (ex: "tar.gz"), PAS extension/path.suffix (qui vaudrait
             # ".gz" pour "x.tar.gz" — voir archive_extractor.py).
             check_key = archive_kind(path) if archive else extension
-            allowed, reason = is_allowed(check_key, size)
+            allowed, reason = is_allowed(check_key, size, source.name)
             if not allowed:
                 logging.debug(f"[IGNORÉ] {filepath} — {reason}")
                 skipped += 1

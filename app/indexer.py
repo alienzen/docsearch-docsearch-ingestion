@@ -386,7 +386,7 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, source: S
 
             extension = real_path.suffix.lower()
             size = real_path.stat().st_size
-            allowed, reason = is_allowed(extension, size)
+            allowed, reason = is_allowed(extension, size, source.name)
             if not allowed:
                 logging.info(f"  [IGNORÉ] {identity} — {reason}")
                 continue
@@ -448,7 +448,7 @@ def index_file(filepath: str, source: Source | None = None):
     if is_archive(path):
         kind = archive_kind(path)
         size = path.stat().st_size
-        allowed, reason = is_allowed(kind, size)
+        allowed, reason = is_allowed(kind, size, source.name)
         if not allowed:
             logging.info(f"  [IGNORÉ] {path.name} — {reason}")
             return
@@ -457,7 +457,7 @@ def index_file(filepath: str, source: Source | None = None):
 
     extension = path.suffix.lower()
     size = path.stat().st_size
-    allowed, reason = is_allowed(extension, size)
+    allowed, reason = is_allowed(extension, size, source.name)
     if not allowed:
         logging.info(f"  [IGNORÉ] {path.name} — {reason}")
         return
