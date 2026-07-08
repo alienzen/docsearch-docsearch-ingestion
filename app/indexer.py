@@ -1,11 +1,9 @@
 # indexer.py — Indexation initiale avec ACL
-# Mis à jour le 29/06/2026 — Tika 3.3.1.0 · Elasticsearch 9.4.2 · ACL POSIX
+# Mis à jour le 08/07/2026 — Tika 3.3.1.0 · Elasticsearch 9.4.2 · ACL POSIX · multi-source
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
-ES_INDEX = os.getenv("ES_INDEX", "documents")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
-DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
 import hashlib
 import logging
@@ -22,6 +20,7 @@ from archive_extractor import (
 )
 from filetype_config import is_allowed, get_enabled_extensions
 from path_filter import is_path_allowed, matches_pattern
+from sources_config import Source, get_source, DEFAULT_SOURCE_NAME, ES_SEARCH_ALIAS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +48,15 @@ SUPPORTED = {".doc", ".docx", ".ppt", ".pptx",
 # .zip, .tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .7z (si py7zr installé)
 
 
-def create_index():
+def _resolve_source(source: Source | None) -> Source:
+    """La plupart des fonctions de ce module acceptent `source=None` pour
+    les points d'entrée CLI/tests mono-source : repli sur la source par
+    défaut ('documents'), qui existe toujours (voir sources_config.py)."""
+    return source if source is not None else get_source(DEFAULT_SOURCE_NAME)
+
+
+def create_index(source: Source | None = None):
+    source = _resolve_source(source)
     mapping = {
         "mappings": {
             "properties": {
@@ -65,6 +72,10 @@ def create_index():
                 },
                 "extension":   {"type": "keyword"},
                 "type":        {"type": "keyword"},
+                # Nom de la source d'origine (sources_config.py) — permet
+                # de filtrer/facetter une recherche fédérée sur plusieurs
+                # index sans avoir à connaître les noms d'index bruts.
+                "source":      {"type": "keyword"},
                 "content":     {"type": "text", "analyzer": "french"},
                 "title":       {"type": "text"},
                 "author":      {
@@ -129,9 +140,16 @@ def create_index():
             }
         }
     }
-    if not es.indices.exists(index=ES_INDEX):
-        es.indices.create(index=ES_INDEX, body=mapping)
-        logging.info("Index 'documents' créé avec support ACL.")
+    if not es.indices.exists(index=source.es_index):
+        es.indices.create(index=source.es_index, body=mapping)
+        logging.info(f"Index '{source.es_index}' créé avec support ACL (source '{source.name}').")
+
+    # Rejoint l'alias fédéré — c'est ce qui permet à docsearch-api de
+    # chercher sur toutes les sources sans connaître leurs noms d'index
+    # à l'avance. `is_write_index` non précisé : cet alias n'est utilisé
+    # qu'en lecture (recherche), jamais comme cible d'écriture.
+    if not es.indices.exists_alias(name=ES_SEARCH_ALIAS, index=source.es_index):
+        es.indices.put_alias(index=source.es_index, name=ES_SEARCH_ALIAS)
 
 
 def extract_text(filepath: str) -> tuple[str, dict]:
@@ -232,12 +250,12 @@ def get_date_modified(metadata: dict, fallback_path: Path | None = None) -> str 
     return None
 
 
-def compute_folder_fields(identity: str) -> tuple[str, str]:
+def compute_folder_fields(identity: str, source: Source | None = None) -> tuple[str, str]:
     """
     Retourne (folder, folder_top) à partir de l'identité d'un document :
-    - folder     : chemin du dossier complet, relatif à DOCS_FOLDER —
-                   utilisé pour un filtrage précis (un sous-dossier
-                   exact ou toute son arborescence)
+    - folder     : chemin du dossier complet, relatif au dossier de la
+                   source — utilisé pour un filtrage précis (un
+                   sous-dossier exact ou toute son arborescence)
     - folder_top : premier segment seul — utilisé pour la facette
                    (nombre de valeurs distinctes raisonnable, même sur
                    un corpus de plusieurs millions de documents)
@@ -247,8 +265,9 @@ def compute_folder_fields(identity: str) -> tuple[str, str]:
     et purge_path(), qui ne portent jamais sur le chemin interne d'un
     membre.
     """
+    source = _resolve_source(source)
     archive_part = identity.split("::", 1)[0]
-    docs_root = Path(DOCS_FOLDER).resolve()
+    docs_root = Path(source.folder).resolve()
 
     try:
         rel_dir = Path(archive_part).resolve().parent.relative_to(docs_root)
@@ -284,7 +303,8 @@ def is_excluded(filename: str) -> bool:
 
 
 def _index_document(tika_path: Path, identity: str, filename: str,
-                     extension: str, acl, size: int, doc_type: str = "document"):
+                     extension: str, acl, size: int, source: Source,
+                     doc_type: str = "document"):
     """
     Extrait le contenu (Tika) et indexe un document dans ES.
 
@@ -297,19 +317,20 @@ def _index_document(tika_path: Path, identity: str, filename: str,
     extraire le contenu (peut différer de `identity`).
     """
     doc_id = file_hash(identity)
-    if es.exists(index=ES_INDEX, id=doc_id):
+    if es.exists(index=source.es_index, id=doc_id):
         logging.info(f"  [SKIP] {identity}")
         return
 
     logging.info(f"  [INDEX] {identity}")
     content, metadata = extract_text(str(tika_path))
-    folder, folder_top = compute_folder_fields(identity)
+    folder, folder_top = compute_folder_fields(identity, source)
 
     doc = {
         "filename":   filename,
         "filepath":   identity,
         "extension":  extension,
         "type":       doc_type,
+        "source":     source.name,
         "content":    content,
         "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
@@ -329,10 +350,10 @@ def _index_document(tika_path: Path, identity: str, filename: str,
             "permissions": acl.permissions,
         },
     }
-    es.index(index=ES_INDEX, id=doc_id, document=doc)
+    es.index(index=source.es_index, id=doc_id, document=doc)
 
 
-def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: int = 0):
+def _process_archive(archive_real_path: Path, identity_root: str, acl, source: Source, depth: int = 0):
     """
     Extrait une archive dans un dossier temporaire et indexe chaque
     membre supporté. Les archives imbriquées sont traitées récursivement
@@ -356,7 +377,7 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: in
             if is_archive(real_path):
                 if depth < max_depth():
                     logging.info(f"  [ARCHIVE IMBRIQUÉE] {identity}")
-                    _process_archive(real_path, identity, acl, depth + 1)
+                    _process_archive(real_path, identity, acl, source, depth + 1)
                 else:
                     logging.warning(
                         f"  [PROFONDEUR MAX] Archive imbriquée ignorée : {identity}"
@@ -377,45 +398,49 @@ def _process_archive(archive_real_path: Path, identity_root: str, acl, depth: in
                 extension=extension,
                 acl=acl,
                 size=size,
+                source=source,
                 doc_type="archive_member",
             )
 
 
-def index_archive(filepath: str):
+def index_archive(filepath: str, source: Source | None = None):
     """Point d'entrée pour indexer le contenu d'une archive (.zip, .tar.*, .7z)."""
+    source = _resolve_source(source)
     path = Path(filepath)
     identity_root = str(path.resolve())
     acl = extract_acl(filepath)   # héritée par tous les membres de l'archive
-    logging.info(f"📦 Ouverture archive : {path.name}")
-    _process_archive(path, identity_root, acl, depth=0)
+    logging.info(f"📦 Ouverture archive : {path.name} (source '{source.name}')")
+    _process_archive(path, identity_root, acl, source, depth=0)
     logging.info(f"✅ Archive traitée : {path.name}")
 
 
-def relative_to_docs_folder(filepath: str) -> str:
+def relative_to_docs_folder(filepath: str, source: Source | None = None) -> str:
     """
-    Calcule le chemin d'un fichier relatif à DOCS_FOLDER — c'est ce
-    chemin qui est comparé aux motifs d'inclusion/exclusion de
+    Calcule le chemin d'un fichier relatif au dossier de `source` — c'est
+    ce chemin qui est comparé aux motifs d'inclusion/exclusion de
     path_filter.py (jamais un chemin absolu, pour que les motifs
     restent valables quel que soit le point de montage).
-    Si le fichier est hors de DOCS_FOLDER (cas rare, usage direct du
-    module hors pipeline normal), retourne le nom seul — aucun
-    filtrage de chemin n'est alors possible mais ça n'empêche pas
+    Si le fichier est hors du dossier de la source (cas rare, usage
+    direct du module hors pipeline normal), retourne le nom seul —
+    aucun filtrage de chemin n'est alors possible mais ça n'empêche pas
     l'indexation.
     """
+    source = _resolve_source(source)
     try:
-        return str(Path(filepath).resolve().relative_to(Path(DOCS_FOLDER).resolve()))
+        return str(Path(filepath).resolve().relative_to(Path(source.folder).resolve()))
     except ValueError:
         return Path(filepath).name
 
 
-def index_file(filepath: str):
+def index_file(filepath: str, source: Source | None = None):
+    source = _resolve_source(source)
     path = Path(filepath)
     if is_excluded(path.name):
         logging.debug(f"  [IGNORÉ] {path.name} (fichier temporaire)")
         return
 
-    rel_path = relative_to_docs_folder(filepath)
-    allowed, reason = is_path_allowed(rel_path)
+    rel_path = relative_to_docs_folder(filepath, source)
+    allowed, reason = is_path_allowed(rel_path, source.name)
     if not allowed:
         logging.info(f"  [IGNORÉ] {path.name} — {reason}")
         return
@@ -427,7 +452,7 @@ def index_file(filepath: str):
         if not allowed:
             logging.info(f"  [IGNORÉ] {path.name} — {reason}")
             return
-        index_archive(filepath)
+        index_archive(filepath, source)
         return
 
     extension = path.suffix.lower()
@@ -446,51 +471,56 @@ def index_file(filepath: str):
         extension=path.suffix.lower(),
         acl=acl,
         size=path.stat().st_size,
+        source=source,
         doc_type="document",
     )
 
 
-def optimize_for_bulk():
-    es.indices.put_settings(index=ES_INDEX, settings={
+def optimize_for_bulk(source: Source | None = None):
+    source = _resolve_source(source)
+    es.indices.put_settings(index=source.es_index, settings={
         "index": {
             "refresh_interval":    "-1",
             "number_of_replicas":  "0",
             "translog.durability": "async",
         }
     })
-    logging.info("⚡ Mode bulk activé.")
+    logging.info(f"⚡ Mode bulk activé ({source.es_index}).")
 
 
-def restore_after_bulk():
-    es.indices.put_settings(index=ES_INDEX, settings={
+def restore_after_bulk(source: Source | None = None):
+    source = _resolve_source(source)
+    es.indices.put_settings(index=source.es_index, settings={
         "index": {
             "refresh_interval":   "30s",
             "number_of_replicas": "1",
         }
     })
-    es.indices.forcemerge(index=ES_INDEX, max_num_segments=5)
-    logging.info("✅ Index restauré.")
+    es.indices.forcemerge(index=source.es_index, max_num_segments=5)
+    logging.info(f"✅ Index restauré ({source.es_index}).")
 
 
-def index_folder(folder_path: str):
-    create_index()
-    optimize_for_bulk()
+def index_folder(folder_path: str, source: Source | None = None):
+    source = _resolve_source(source)
+    create_index(source)
+    optimize_for_bulk(source)
     count = 0
     for root, _, files in os.walk(folder_path):
         for filename in files:
             try:
-                index_file(os.path.join(root, filename))
+                index_file(os.path.join(root, filename), source)
                 count += 1
             except Exception as e:
                 logging.error(f"  [ERREUR] {filename} : {e}")
-    restore_after_bulk()
-    logging.info(f"✅ {count} fichiers indexés.")
+    restore_after_bulk(source)
+    logging.info(f"✅ {count} fichiers indexés dans '{source.es_index}' (source '{source.name}').")
 
 
-def _relative_candidates(filepath: str) -> list[str]:
+def _relative_candidates(filepath: str, source: Source) -> list[str]:
     """
-    Calcule le chemin relatif à DOCS_FOLDER à comparer à un motif de
-    purge, à partir du champ `filepath` stocké dans un document ES.
+    Calcule le chemin relatif au dossier de `source` à comparer à un
+    motif de purge, à partir du champ `filepath` stocké dans un document
+    ES.
 
     Pour un membre d'archive ("archive.zip::membre"), seul l'emplacement
     de L'ARCHIVE ELLE-MÊME est retourné — jamais le chemin interne du
@@ -500,7 +530,7 @@ def _relative_candidates(filepath: str) -> list[str]:
     le chemin interne d'un membre n'a jamais sa propre existence en tant
     que "chemin sur le disque" filtrable indépendamment.
     """
-    docs_root = str(Path(DOCS_FOLDER).resolve())
+    docs_root = str(Path(source.folder).resolve())
     archive_part = filepath.split("::", 1)[0]
 
     try:
@@ -511,11 +541,11 @@ def _relative_candidates(filepath: str) -> list[str]:
     return [rel]
 
 
-def purge_path(pattern: str, dry_run: bool = True) -> int:
+def purge_path(pattern: str, source: Source | None = None, dry_run: bool = True) -> int:
     """
     Supprime de l'index tous les documents DÉJÀ INDEXÉS dont le chemin
-    (relatif à DOCS_FOLDER) correspond à `pattern` — même syntaxe glob
-    que path_filter.py (exclude-path/include-path).
+    (relatif au dossier de `source`) correspond à `pattern` — même
+    syntaxe glob que path_filter.py (exclude-path/include-path).
 
     Utile car exclude-path n'agit que sur les futurs passages
     (scan/watcher) : cette fonction nettoie l'EXISTANT.
@@ -528,11 +558,12 @@ def purge_path(pattern: str, dry_run: bool = True) -> int:
     Utilise le scan/scroll ES (pas une simple recherche size=1000) pour
     rester correct même sur un index de plusieurs millions de documents.
     """
+    source = _resolve_source(source)
     to_delete = []
     matched = 0
 
     for hit in es_scan(
-        es, index=ES_INDEX,
+        es, index=source.es_index,
         query={"query": {"match_all": {}}},
         _source=["filepath"],
     ):
@@ -540,13 +571,13 @@ def purge_path(pattern: str, dry_run: bool = True) -> int:
         if not filepath:
             continue
 
-        candidates = _relative_candidates(filepath)
+        candidates = _relative_candidates(filepath, source)
         if any(matches_pattern(c, pattern) for c in candidates):
             matched += 1
             if not dry_run:
                 to_delete.append({
                     "_op_type": "delete",
-                    "_index":   ES_INDEX,
+                    "_index":   source.es_index,
                     "_id":      hit["_id"],
                 })
 
@@ -554,10 +585,11 @@ def purge_path(pattern: str, dry_run: bool = True) -> int:
         ok, errors = es_bulk(es, to_delete, raise_on_error=False)
         if errors:
             logging.error(f"[purge_path] {len(errors)} erreur(s) de suppression")
-        es.indices.refresh(index=ES_INDEX)
+        es.indices.refresh(index=source.es_index)
 
     return matched
 
 
 if __name__ == "__main__":
-    index_folder(DOCS_FOLDER)
+    default_source = get_source(DEFAULT_SOURCE_NAME)
+    index_folder(default_source.folder, default_source)

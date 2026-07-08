@@ -1,12 +1,11 @@
 # worker.py — Worker d'indexation avec ACL
-# Mis à jour le 29/06/2026 — Tika 3.3.1.0 · ES 9.4.2 · ACL
+# Mis à jour le 08/07/2026 — Tika 3.3.1.0 · ES 9.4.2 · ACL · multi-source
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 WORKER_BATCH_SIZE = int(os.getenv("WORKER_BATCH_SIZE", "200"))
-DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
 import json
 import time
@@ -20,10 +19,11 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, is_excluded, index_archive, ES_INDEX, get_date_created, get_date_modified, compute_folder_fields
+from indexer import get_author, get_title, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
+from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 # WORKER_BATCH_SIZE (Kafka max_poll_records) reste fixé au démarrage :
 # changer cette valeur nécessite de recréer le KafkaConsumer, donc un
@@ -58,7 +58,7 @@ def extract(filepath: str) -> tuple[str, dict]:
     return content, metadata
 
 
-def build_action(filepath: str, content: str, metadata: dict, extension: str) -> dict:
+def build_action(filepath: str, content: str, metadata: dict, extension: str, source: Source) -> dict:
     path     = Path(filepath)
     identity = str(Path(filepath).resolve())
     doc_id   = hashlib.md5(identity.encode()).hexdigest()
@@ -70,17 +70,18 @@ def build_action(filepath: str, content: str, metadata: dict, extension: str) ->
     # indexer.py (_index_document) — ce fichier construit son propre
     # document ES séparément (bulk via le pipeline producer/workers) et
     # ces champs y avaient été oubliés lors de leur ajout initial.
-    folder, folder_top = compute_folder_fields(identity)
+    folder, folder_top = compute_folder_fields(identity, source)
 
     return {
         "_op_type": "index",
-        "_index":   ES_INDEX,
+        "_index":   source.es_index,
         "_id":      doc_id,
         "_source": {
             "filename":       path.name,
             "filepath":       identity,
             "extension":      extension,
             "type":           "document",
+            "source":         source.name,
             "content":        content,
             "title":          get_title(metadata, path.stem),
             "author":         get_author(metadata),
@@ -108,7 +109,7 @@ def _flush(buffer: list, errors_total: int) -> int:
         return errors_total
     ok, errors = bulk(es, buffer, raise_on_error=False)
     errors_total += len(errors)
-    logging.info(f"Lot flush\u00e9 : {ok} OK / {len(errors)} erreurs (buffer vid\u00e9)")
+    logging.info(f"Lot flushé : {ok} OK / {len(errors)} erreurs (buffer vidé)")
     buffer.clear()
     return errors_total
 
@@ -149,6 +150,17 @@ def run_worker(batch_size: int = BATCH):
                 for message in messages:
                     filepath  = message.value["filepath"]
                     extension = message.value.get("extension", "")
+                    source_name = message.value.get("source", DEFAULT_SOURCE_NAME)
+
+                    try:
+                        source = get_source(source_name)
+                    except KeyError as e:
+                        # Source retirée du registre entre la publication
+                        # et la consommation du message (course rare mais
+                        # possible avec remove-source) : on abandonne ce
+                        # message plutôt que de planter le worker.
+                        logging.warning(f"[IGNORÉ] {filepath} — {e}")
+                        continue
 
                     if is_excluded(Path(filepath).name):
                         logging.debug(f"[SKIP] Fichier temporaire ignoré : {filepath}")
@@ -172,10 +184,10 @@ def run_worker(batch_size: int = BATCH):
                         # Traité directement (extraction + indexation
                         # immédiate de chaque membre, pas de mise en
                         # buffer bulk() ici) : le fichier archive est
-                        # sur le volume partagé /documents, accessible
+                        # sur le volume partagé /sources, accessible
                         # depuis n'importe quel worker.
                         try:
-                            index_archive(filepath)
+                            index_archive(filepath, source)
                         except Exception as e:
                             logging.error(f"Erreur archive [{filepath}] : {e}")
                         continue
@@ -190,17 +202,17 @@ def run_worker(batch_size: int = BATCH):
                         continue
 
                     doc_id = hashlib.md5(str(Path(filepath).resolve()).encode()).hexdigest()
-                    if es.exists(index=ES_INDEX, id=doc_id):
+                    if es.exists(index=source.es_index, id=doc_id):
                         logging.debug(f"[SKIP] Déjà indexé : {filepath}")
                         continue
 
                     try:
                         if extension == ".pst":
                             from pst_extractor import index_pst
-                            index_pst(filepath)
+                            index_pst(filepath, source)
                             continue
                         content, metadata = extract(filepath)
-                        buffer.append(build_action(filepath, content, metadata, extension))
+                        buffer.append(build_action(filepath, content, metadata, extension, source))
                     except Exception as e:
                         logging.error(f"Erreur [{filepath}] : {e}")
 

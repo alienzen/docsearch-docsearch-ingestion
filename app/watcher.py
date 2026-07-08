@@ -1,11 +1,10 @@
-# watcher.py — Surveillance dossier avec mise à jour ACL
-# Mis à jour le 29/06/2026 — ACL intégrées
+# watcher.py — Surveillance multi-source avec mise à jour ACL
+# Mis à jour le 08/07/2026 — multi-source (un observateur par source)
 
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
-DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
 import time
 import logging
@@ -16,11 +15,12 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, is_excluded, ES_INDEX, relative_to_docs_folder
+from indexer import index_file, is_excluded, relative_to_docs_folder
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
 from path_filter import is_path_allowed
+from sources_config import Source, get_sources
 
 # ── Battement de cœur (pour le panneau d'administration) ──────
 # Écrit l'heure du dernier cycle de surveillance dans Redis, afin que
@@ -49,7 +49,6 @@ logging.basicConfig(
     ]
 )
 
-ES_HOST = ES_HOST
 es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3)
 
 
@@ -59,7 +58,7 @@ def file_hash(filepath: str) -> str:
     return hashlib.md5(normalized.encode()).hexdigest()
 
 
-def delete_from_index(filepath: str):
+def delete_from_index(filepath: str, source: Source):
     """
     Supprime un document de l'index par son ID (hash du chemin normalisé).
     Plus fiable que delete_by_query : pas de problème de chemin relatif/absolu,
@@ -74,8 +73,8 @@ def delete_from_index(filepath: str):
     normalized = str(Path(filepath).resolve())
     doc_id     = hashlib.md5(normalized.encode()).hexdigest()
     try:
-        es.delete(index=ES_INDEX, id=doc_id, refresh=True)
-        logging.info(f"🗑️  Supprimé de l'index : {normalized}")
+        es.delete(index=source.es_index, id=doc_id, refresh=True)
+        logging.info(f"🗑️  Supprimé de l'index '{source.es_index}' : {normalized}")
     except Exception as e:
         if "NotFoundError" in type(e).__name__ or "404" in str(e):
             logging.debug(f"Document seul introuvable (normal pour une archive) : {normalized}")
@@ -85,7 +84,7 @@ def delete_from_index(filepath: str):
     if is_archive(Path(filepath)):
         try:
             res = es.delete_by_query(
-                index=ES_INDEX,
+                index=source.es_index,
                 query={"wildcard": {"filepath": f"{normalized}::*"}},
                 refresh=True,
             )
@@ -95,7 +94,7 @@ def delete_from_index(filepath: str):
             logging.error(f"Erreur suppression des membres d'archive ({normalized}) : {e}")
 
 
-def update_acl_only(filepath: str):
+def update_acl_only(filepath: str, source: Source):
     """
     Met à jour uniquement le champ acl sans relancer Tika.
     Utilisé quand seules les permissions du fichier ont changé.
@@ -104,7 +103,7 @@ def update_acl_only(filepath: str):
         doc_id = file_hash(filepath)
         acl    = extract_acl(filepath)
         es.update(
-            index=ES_INDEX,
+            index=source.es_index,
             id=doc_id,
             doc={
                 "acl": {
@@ -123,17 +122,17 @@ def update_acl_only(filepath: str):
         logging.error(f"Erreur update ACL ({filepath}) : {e}")
 
 
-def get_indexed_acl(filepath: str) -> dict | None:
+def get_indexed_acl(filepath: str, source: Source) -> dict | None:
     """Récupère les ACL actuellement indexées pour un fichier."""
     try:
         doc_id = file_hash(filepath)
-        res    = es.get(index=ES_INDEX, id=doc_id, source=["acl"])
+        res    = es.get(index=source.es_index, id=doc_id, source=["acl"])
         return res["_source"].get("acl")
     except Exception:
         return None
 
 
-def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bool:
+def _copy_document(old_identity: str, new_identity: str, source: Source, updated_acl=None) -> bool:
     """
     Copie un document déjà indexé vers une nouvelle identité (nouveau
     chemin), SANS relancer Tika. Utilisé pour les renommages/déplacements
@@ -147,7 +146,7 @@ def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bo
     old_id = hashlib.md5(old_identity.encode()).hexdigest()
     new_id = hashlib.md5(new_identity.encode()).hexdigest()
     try:
-        old_doc = es.get(index=ES_INDEX, id=old_id)["_source"]
+        old_doc = es.get(index=source.es_index, id=old_id)["_source"]
     except Exception:
         return False
 
@@ -163,12 +162,12 @@ def _copy_document(old_identity: str, new_identity: str, updated_acl=None) -> bo
             "permissions": updated_acl.permissions,
         }
 
-    es.index(index=ES_INDEX, id=new_id, document=new_doc)
-    es.delete(index=ES_INDEX, id=old_id, refresh=True)
+    es.index(index=source.es_index, id=new_id, document=new_doc)
+    es.delete(index=source.es_index, id=old_id, refresh=True)
     return True
 
 
-def _new_path_allowed(new_path: str) -> bool:
+def _new_path_allowed(new_path: str, source: Source) -> bool:
     """
     Vérifie si le NOUVEAU chemin (après renommage de dossier) reste
     autorisé par les filtres d'inclusion/exclusion. Pour un membre
@@ -176,12 +175,12 @@ def _new_path_allowed(new_path: str) -> bool:
     l'archive elle-même qui compte (avant le "::").
     """
     archive_part = new_path.split("::", 1)[0]
-    rel = relative_to_docs_folder(archive_part)
-    allowed, _ = is_path_allowed(rel)
+    rel = relative_to_docs_folder(archive_part, source)
+    allowed, _ = is_path_allowed(rel, source.name)
     return allowed
 
 
-def _rename_prefix(old_root: str, new_root: str) -> int:
+def _rename_prefix(old_root: str, new_root: str, source: Source) -> int:
     """
     Renomme en base TOUS les documents dont le filepath commence par
     old_root — utilisé quand un DOSSIER ENTIER est déplacé/renommé.
@@ -210,7 +209,7 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
     }
     renamed, removed = 0, 0
     try:
-        resp = es.search(index=ES_INDEX, query=query, size=1000)
+        resp = es.search(index=source.es_index, query=query, size=1000)
     except Exception as e:
         logging.error(f"Erreur recherche pour renommage de préfixe : {e}")
         return 0
@@ -221,9 +220,9 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
         old_path = doc["filepath"]
         new_path = new_root + old_path[len(old_root):]
 
-        if not _new_path_allowed(new_path):
+        if not _new_path_allowed(new_path, source):
             try:
-                es.delete(index=ES_INDEX, id=old_id)
+                es.delete(index=source.es_index, id=old_id)
                 removed += 1
                 logging.info(f"   Nouvel emplacement exclu — retiré de l'index : {new_path}")
             except Exception as e:
@@ -233,25 +232,25 @@ def _rename_prefix(old_root: str, new_root: str) -> int:
         doc["filepath"] = new_path
         new_id = hashlib.md5(new_path.encode()).hexdigest()
         try:
-            es.index(index=ES_INDEX, id=new_id, document=doc)
-            es.delete(index=ES_INDEX, id=old_id)
+            es.index(index=source.es_index, id=new_id, document=doc)
+            es.delete(index=source.es_index, id=old_id)
             renamed += 1
         except Exception as e:
             logging.error(f"Erreur renommage ({old_path} -> {new_path}) : {e}")
 
     if renamed or removed:
-        es.indices.refresh(index=ES_INDEX)
+        es.indices.refresh(index=source.es_index)
     if removed:
         logging.info(f"   ({removed} document(s) retiré(s) car nouvel emplacement exclu)")
     return renamed
 
 
-def _rename_archive_members(old_root: str, new_root: str, updated_acl=None) -> int:
+def _rename_archive_members(old_root: str, new_root: str, source: Source, updated_acl=None) -> int:
     """Renomme tous les membres indexés d'une archive déplacée/renommée."""
     query = {"prefix": {"filepath": f"{old_root}::"}}
     renamed = 0
     try:
-        resp = es.search(index=ES_INDEX, query=query, size=1000)
+        resp = es.search(index=source.es_index, query=query, size=1000)
     except Exception as e:
         logging.error(f"Erreur recherche membres d'archive : {e}")
         return 0
@@ -273,18 +272,27 @@ def _rename_archive_members(old_root: str, new_root: str, updated_acl=None) -> i
             }
         new_id = hashlib.md5(new_identity.encode()).hexdigest()
         try:
-            es.index(index=ES_INDEX, id=new_id, document=doc)
-            es.delete(index=ES_INDEX, id=old_id)
+            es.index(index=source.es_index, id=new_id, document=doc)
+            es.delete(index=source.es_index, id=old_id)
             renamed += 1
         except Exception as e:
             logging.error(f"Erreur renommage membre ({old_id}) : {e}")
 
     if renamed:
-        es.indices.refresh(index=ES_INDEX)
+        es.indices.refresh(index=source.es_index)
     return renamed
 
 
 class DocumentHandler(FileSystemEventHandler):
+    """
+    Un DocumentHandler est lié à UNE SEULE source (voir sources_config.py)
+    — chaque source surveillée a son propre observateur watchdog et sa
+    propre instance de ce handler, pour que tous les appels ES/Kafka
+    qu'il déclenche ciblent le bon index et le bon dossier de référence.
+    """
+
+    def __init__(self, source: Source):
+        self.source = source
 
     def _is_supported(self, path):
         p = Path(path)
@@ -310,8 +318,8 @@ class DocumentHandler(FileSystemEventHandler):
         la boucle d'attente de stabilisation de _safe_index() pour un
         fichier qu'on sait déjà destiné à être rejeté.
         """
-        rel_path = relative_to_docs_folder(path)
-        allowed, reason = is_path_allowed(rel_path)
+        rel_path = relative_to_docs_folder(path, self.source)
+        allowed, reason = is_path_allowed(rel_path, self.source.name)
         if not allowed:
             logging.debug(f"[IGNORÉ] {path} — {reason}")
         return allowed
@@ -321,7 +329,7 @@ class DocumentHandler(FileSystemEventHandler):
             return
         if not self._path_allowed(event.src_path):
             return
-        logging.info(f"📄 Nouveau fichier : {event.src_path}")
+        logging.info(f"📄 Nouveau fichier [{self.source.name}] : {event.src_path}")
         self._safe_index(event.src_path)
 
     def on_modified(self, event):
@@ -330,21 +338,21 @@ class DocumentHandler(FileSystemEventHandler):
         if not self._path_allowed(event.src_path):
             # Le fichier est dans un dossier désormais exclu — s'il avait
             # été indexé avant l'ajout du filtre, le retirer proprement.
-            delete_from_index(event.src_path)
+            delete_from_index(event.src_path, self.source)
             return
-        logging.info(f"✏️  Fichier modifié : {event.src_path}")
+        logging.info(f"✏️  Fichier modifié [{self.source.name}] : {event.src_path}")
 
         # Les archives ne sont jamais indexées comme document unique
         # (seuls leurs membres le sont) — pas de diff ACL possible sur
         # un doc qui n'existe pas : on supprime tous ses membres puis
         # on réextrait/réindexe systématiquement.
         if is_archive(Path(event.src_path)):
-            delete_from_index(event.src_path)
+            delete_from_index(event.src_path, self.source)
             self._safe_index(event.src_path)
             return
 
         # Vérifier si seules les ACL ont changé
-        old_acl = get_indexed_acl(event.src_path)
+        old_acl = get_indexed_acl(event.src_path, self.source)
         new_acl = extract_acl(event.src_path)
 
         if old_acl and (
@@ -355,12 +363,12 @@ class DocumentHandler(FileSystemEventHandler):
             old_acl.get("public") == new_acl.public
         ):
             # Contenu potentiellement modifié, réindexation complète
-            delete_from_index(event.src_path)
+            delete_from_index(event.src_path, self.source)
             self._safe_index(event.src_path)
         else:
             # Seules les ACL ont changé : mise à jour légère
             logging.info(f"🔑 Changement ACL détecté : {event.src_path}")
-            update_acl_only(event.src_path)
+            update_acl_only(event.src_path, self.source)
 
     def on_deleted(self, event):
         if event.is_directory or not self._is_supported(event.src_path):
@@ -368,8 +376,8 @@ class DocumentHandler(FileSystemEventHandler):
         # Reconstituer le chemin absolu tel qu'il a été stocké à l'indexation
         # (str(Path(p).absolute()) dans indexer.py)
         abs_path = str(Path(event.src_path).absolute())
-        logging.info(f"🗑️  Fichier supprimé : {abs_path}")
-        delete_from_index(abs_path)
+        logging.info(f"🗑️  Fichier supprimé [{self.source.name}] : {abs_path}")
+        delete_from_index(abs_path, self.source)
 
     def on_moved(self, event):
         src = str(Path(event.src_path).absolute())
@@ -380,21 +388,21 @@ class DocumentHandler(FileSystemEventHandler):
             # documents dont le filepath commence par l'ancien chemin
             # sont renommés directement en base (réécriture du seul
             # champ filepath), SANS relancer Tika sur chaque fichier.
-            logging.info(f"📁 Dossier déplacé : {src} → {dst}")
-            n = _rename_prefix(src, dst)
+            logging.info(f"📁 Dossier déplacé [{self.source.name}] : {src} → {dst}")
+            n = _rename_prefix(src, dst, self.source)
             logging.info(f"   {n} document(s) renommé(s) en base, sans réextraction")
             return
 
         if not self._is_supported(event.src_path):
             return
 
-        logging.info(f"🔀 Déplacé : {src} → {dst}")
+        logging.info(f"🔀 Déplacé [{self.source.name}] : {src} → {dst}")
 
         if not self._path_allowed(dst):
             # Déplacé VERS un emplacement désormais exclu : retirer de
             # l'index plutôt que de renommer (le fichier existe toujours
             # sur le disque, mais ne doit plus être indexé à cet endroit).
-            delete_from_index(src)
+            delete_from_index(src, self.source)
             logging.info(f"   Déplacé vers un emplacement exclu — retiré de l'index : {dst}")
             return
 
@@ -403,7 +411,7 @@ class DocumentHandler(FileSystemEventHandler):
             # seuls ses membres le sont ("archive::membre") — il faut
             # renommer leur préfixe individuellement.
             acl = extract_acl(dst)
-            n = _rename_archive_members(src, dst, updated_acl=acl)
+            n = _rename_archive_members(src, dst, self.source, updated_acl=acl)
             logging.info(f"   {n} membre(s) d'archive renommé(s), sans réextraction")
             return
 
@@ -413,7 +421,7 @@ class DocumentHandler(FileSystemEventHandler):
         # comparaison avec Tika) au cas où le déplacement change aussi
         # les droits (changement de dossier parent).
         acl = extract_acl(dst)
-        if _copy_document(src, dst, updated_acl=acl):
+        if _copy_document(src, dst, self.source, updated_acl=acl):
             logging.info(f"   ✅ Renommé sans réextraction Tika : {dst}")
         else:
             # Document introuvable sous l'ancienne identité (jamais
@@ -430,7 +438,7 @@ class DocumentHandler(FileSystemEventHandler):
                 while prev != path.stat().st_size:
                     prev = path.stat().st_size
                     time.sleep(0.5)
-                index_file(filepath)
+                index_file(filepath, self.source)
                 return
             except Exception as e:
                 logging.warning(f"Tentative {attempt+1}/{retries} ({filepath}) : {e}")
@@ -438,47 +446,92 @@ class DocumentHandler(FileSystemEventHandler):
         logging.error(f"❌ Impossible d'indexer : {filepath}")
 
 
-def start_watcher(folder_path: str, recursive: bool = True):
-    # PollingObserver est requis pour les partages réseau (CIFS, NFS, SMB)
-    # car inotify ne reçoit pas les événements filesystem sur ces montages.
-    # L'intervalle de polling (watcher_poll_interval) est modifiable à
-    # chaud via ./manage.sh set-config — contrairement aux autres
-    # paramètres dynamiques, le changer nécessite ici de redémarrer
-    # l'observateur watchdog (le timeout est fixé à sa construction),
-    # ce que la boucle principale ci-dessous fait automatiquement dès
-    # qu'elle détecte un changement.
-    handler = DocumentHandler()
+def start_watcher():
+    """
+    Surveille TOUTES les sources enregistrées (sources_config.py)
+    simultanément — un PollingObserver + un DocumentHandler par source,
+    démarré/arrêté dynamiquement à chaque itération de la boucle
+    principale en fonction du registre courant. C'est ce qui permet
+    d'ajouter (ou de retirer) une source à chaud, sans redémarrer ce
+    conteneur : ./manage.sh add-source suffit, ce process la détecte
+    dans les ~5s qui suivent.
 
-    def _new_observer(interval: int) -> PollingObserver:
+    PollingObserver est requis pour les partages réseau (CIFS, NFS, SMB)
+    car inotify ne reçoit pas les événements filesystem sur ces montages.
+    L'intervalle de polling (watcher_poll_interval) est modifiable à
+    chaud via ./manage.sh set-config — le changer nécessite de recréer
+    chaque observateur (le timeout est fixé à sa construction), ce que
+    la boucle ci-dessous fait automatiquement dès qu'elle détecte un
+    changement.
+    """
+    # {source_name: {"observer": PollingObserver, "folder": str}}
+    active: dict[str, dict] = {}
+    current_interval = get_param("watcher_poll_interval")
+
+    def _start_observer(source: Source, interval: int) -> PollingObserver:
+        handler = DocumentHandler(source)
         obs = PollingObserver(timeout=interval)
-        obs.schedule(handler, folder_path, recursive=recursive)
+        obs.schedule(handler, source.folder, recursive=True)
         obs.start()
         return obs
 
-    current_interval = get_param("watcher_poll_interval")
-    observer = _new_observer(current_interval)
-    logging.info(
-        f"👁️  Surveillance démarrée : {folder_path} "
-        f"(mode polling toutes les {current_interval}s — compatible CIFS/NFS)"
-    )
+    def _stop_observer(name: str):
+        entry = active.pop(name, None)
+        if entry is None:
+            return
+        entry["observer"].stop()
+        entry["observer"].join()
+
+    def _sync_sources(interval: int):
+        """Démarre/arrête les observateurs pour coller au registre
+        courant. Redémarre aussi un observateur dont le dossier a
+        changé (rare : équivaut à changer subfolder via add-source sur
+        une source déjà active)."""
+        sources = get_sources()
+
+        for name in list(active):
+            if name not in sources or active[name]["folder"] != sources[name].folder:
+                logging.info(f"🛑 Source retirée ou modifiée — arrêt de la surveillance : {name}")
+                _stop_observer(name)
+
+        for name, source in sources.items():
+            if name not in active:
+                if not Path(source.folder).is_dir():
+                    logging.warning(
+                        f"⏭️  Source '{name}' enregistrée mais dossier introuvable "
+                        f"({source.folder}) — surveillance différée jusqu'à sa création."
+                    )
+                    continue
+                active[name] = {
+                    "observer": _start_observer(source, interval),
+                    "folder":   source.folder,
+                }
+                logging.info(
+                    f"👁️  Surveillance démarrée : {source.folder} (source '{name}' → "
+                    f"index '{source.es_index}', polling toutes les {interval}s)"
+                )
+
+    _sync_sources(current_interval)
     try:
         while True:
             time.sleep(5)
             _write_heartbeat()
+
             new_interval = get_param("watcher_poll_interval")
             if new_interval != current_interval:
                 logging.info(
                     f"🔄 Intervalle de polling modifié : {current_interval}s → "
-                    f"{new_interval}s — redémarrage de l'observateur."
+                    f"{new_interval}s — redémarrage de tous les observateurs."
                 )
-                observer.stop()
-                observer.join()
-                observer = _new_observer(new_interval)
+                for name in list(active):
+                    _stop_observer(name)
                 current_interval = new_interval
+
+            _sync_sources(current_interval)
     except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+        for name in list(active):
+            _stop_observer(name)
 
 
 if __name__ == "__main__":
-    start_watcher(DOCS_FOLDER)
+    start_watcher()

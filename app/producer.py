@@ -1,25 +1,28 @@
 # producer.py — Producer Kafka pour l'indexation parallèle
 #
-# Rôle : parcourir DOCS_FOLDER et publier une référence de chaque
-# fichier à indexer sur le topic Kafka "documents-to-index". Les
-# workers (worker.py, plusieurs instances en parallèle) consomment
-# ce topic et font le travail lourd (extraction Tika + indexation ES).
+# Rôle : parcourir le dossier d'une SOURCE (sources_config.py) et publier
+# une référence de chaque fichier à indexer sur le topic Kafka
+# "documents-to-index". Les workers (worker.py, plusieurs instances en
+# parallèle) consomment ce topic et font le travail lourd (extraction
+# Tika + indexation ES) — le pool de workers est PARTAGÉ entre toutes les
+# sources, chaque message Kafka porte le nom de sa source d'origine pour
+# que le worker sache quel index/dossier cibler.
 #
 # C'est ce qui permet un débit d'indexation élevé : ce script est
 # rapide (il ne fait que lister les fichiers), la charge réelle est
 # distribuée sur N workers qui tournent simultanément.
 #
 # Usage :
-#   python producer.py            # scan unique de DOCS_FOLDER
+#   python producer.py                        # source par défaut, dossier complet
+#   python producer.py finance                 # source "finance", dossier complet
+#   python producer.py finance rapports/2025    # source "finance", sous-dossier
 #
 # Le nombre de partitions du topic doit être >= au nombre de workers
 # pour que tous les workers reçoivent effectivement des messages —
 # voir KAFKA_NUM_PARTITIONS dans docker-compose.yml (docsearch-infra).
 
 import os
-ES_HOST         = os.getenv("ES_HOST", "http://localhost:9200")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
-DOCS_FOLDER     = os.getenv("DOCS_FOLDER", "/documents")
 KAFKA_TOPIC     = os.getenv("KAFKA_TOPIC", "documents-to-index")
 
 import json
@@ -31,10 +34,11 @@ from kafka import KafkaProducer, KafkaConsumer, TopicPartition
 from kafka.admin import KafkaAdminClient
 from kafka.errors import KafkaError
 
-from indexer import is_excluded, create_index, optimize_for_bulk, restore_after_bulk, es
+from indexer import is_excluded, create_index, optimize_for_bulk, restore_after_bulk
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded
+from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 KAFKA_WORKER_GROUP = "indexer-workers"
 
@@ -58,21 +62,23 @@ def build_producer() -> KafkaProducer:
     )
 
 
-def scan_and_produce(folder_path: str) -> tuple[int, int]:
+def scan_and_produce(folder_path: str, source: Source) -> tuple[int, int]:
     """
-    Parcourt folder_path et publie une référence Kafka pour chaque
-    fichier indexable (extension supportée ou archive).
-    Retourne (nb_publies, nb_ignores).
+    Parcourt folder_path (un sous-dossier du dossier de `source`, ou ce
+    dossier lui-même) et publie une référence Kafka pour chaque fichier
+    indexable (extension supportée ou archive). Chaque message porte
+    `source.name` pour que le worker qui le consomme sache dans quel
+    index écrire. Retourne (nb_publies, nb_ignores).
 
     Les chemins comparés aux motifs d'inclusion/exclusion (path_filter)
-    sont TOUJOURS relatifs à DOCS_FOLDER, jamais à folder_path — car
-    folder_path peut être un simple sous-dossier ciblé (./manage.sh
-    init finance) alors que les motifs sont définis relativement à la
-    racine des documents.
+    sont TOUJOURS relatifs au dossier de `source`, jamais à folder_path —
+    car folder_path peut être un simple sous-dossier ciblé (./manage.sh
+    init finance rapports) alors que les motifs sont définis relativement
+    à la racine de la source.
     """
     producer = build_producer()
     published, skipped = 0, 0
-    docs_root = Path(DOCS_FOLDER).resolve()
+    docs_root = Path(source.folder).resolve()
 
     for root, dirs, files in os.walk(folder_path):
         rel_root = os.path.relpath(root, docs_root)
@@ -87,7 +93,7 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
         # blanche ne peut pas servir à élaguer sans risque).
         dirs[:] = [
             d for d in dirs
-            if not is_dir_excluded(f"{rel_root}/{d}" if rel_root else d)
+            if not is_dir_excluded(f"{rel_root}/{d}" if rel_root else d, source.name)
         ]
 
         for filename in files:
@@ -99,7 +105,7 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
                 skipped += 1
                 continue
 
-            allowed, reason = is_path_allowed(rel_file)
+            allowed, reason = is_path_allowed(rel_file, source.name)
             if not allowed:
                 logging.debug(f"[IGNORÉ] {filepath} — {reason}")
                 skipped += 1
@@ -128,6 +134,7 @@ def scan_and_produce(folder_path: str) -> tuple[int, int]:
                 "filepath":  str(path.resolve()),
                 "extension": extension,
                 "is_archive": archive,
+                "source":    source.name,
             }
             try:
                 producer.send(KAFKA_TOPIC, value=message)
@@ -183,34 +190,41 @@ def wait_for_workers_to_catch_up(poll_interval: int = 10) -> None:
 if __name__ == "__main__":
     import sys
 
-    # Argument optionnel : ne scanner qu'un sous-dossier de DOCS_FOLDER
-    # (chemin relatif à DOCS_FOLDER, ou chemin absolu sous DOCS_FOLDER).
-    #   python producer.py                    → scan complet
-    #   python producer.py finance            → /documents/finance uniquement
-    #   python producer.py /documents/finance → équivalent (absolu)
-    target_folder = DOCS_FOLDER
-    if len(sys.argv) > 1:
-        arg = sys.argv[1]
-        candidate = Path(arg) if os.path.isabs(arg) else Path(DOCS_FOLDER) / arg
+    # Arguments optionnels :
+    #   python producer.py                          → source par défaut, scan complet
+    #   python producer.py finance                   → source "finance", scan complet
+    #   python producer.py finance rapports/2025      → source "finance", sous-dossier
+    source_name = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SOURCE_NAME
+    subfolder   = sys.argv[2] if len(sys.argv) > 2 else None
+
+    try:
+        source = get_source(source_name)
+    except KeyError as e:
+        logging.error(f"❌ {e}")
+        sys.exit(1)
+
+    docs_root = Path(source.folder).resolve()
+    target_folder = docs_root
+    if subfolder:
+        candidate = Path(subfolder) if os.path.isabs(subfolder) else docs_root / subfolder
         candidate = candidate.resolve()
-        docs_root = Path(DOCS_FOLDER).resolve()
 
         if docs_root != candidate and docs_root not in candidate.parents:
             logging.error(
-                f"❌ '{candidate}' est en dehors de DOCS_FOLDER ({docs_root}) — abandon."
+                f"❌ '{candidate}' est en dehors du dossier de la source '{source.name}' ({docs_root}) — abandon."
             )
             sys.exit(1)
         if not candidate.is_dir():
             logging.error(f"❌ Dossier introuvable : {candidate}")
             sys.exit(1)
 
-        target_folder = str(candidate)
+        target_folder = candidate
 
-    logging.info(f"📂 Scan de {target_folder}...")
-    create_index()   # s'assure que le mapping ES existe avant tout traitement
-    optimize_for_bulk()
+    logging.info(f"📂 Scan de {target_folder} (source '{source.name}' → index '{source.es_index}')...")
+    create_index(source)   # s'assure que le mapping ES existe avant tout traitement
+    optimize_for_bulk(source)
     try:
-        published, skipped = scan_and_produce(target_folder)
+        published, skipped = scan_and_produce(str(target_folder), source)
         logging.info(
             f"✅ {published} fichier(s) publié(s) sur Kafka ({KAFKA_TOPIC}), "
             f"{skipped} ignoré(s). Les workers vont maintenant les traiter en parallèle."
@@ -221,4 +235,4 @@ if __name__ == "__main__":
         # index laissé avec 0 replica / refresh désactivé est un risque
         # en production (perte de tolérance de panne, résultats non à
         # jour), pas seulement une perte de performance.
-        restore_after_bulk()
+        restore_after_bulk(source)

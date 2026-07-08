@@ -18,8 +18,6 @@
 
 import os
 ES_HOST     = os.getenv("ES_HOST", "http://localhost:9200")
-ES_INDEX    = os.getenv("ES_INDEX", "documents")
-DOCS_FOLDER = os.getenv("DOCS_FOLDER", "/documents")
 
 import json
 import hashlib
@@ -30,6 +28,7 @@ from datetime import datetime, timezone
 
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl
+from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PST] %(message)s")
 
@@ -42,11 +41,11 @@ SYSTEM_PYTHON = "/usr/bin/python3"
 PST_WORKER    = str(Path(__file__).parent / "pst_worker.py")
 
 
-def index_email(email: dict, pst_filename: str, pst_acl) -> None:
+def index_email(email: dict, pst_filename: str, pst_acl, source: Source) -> None:
     unique_str = f"{email.get('subject','')}{email.get('sender_email','')}{email.get('date','')}"
     doc_id = hashlib.md5(unique_str.encode()).hexdigest()
 
-    if es.exists(index=ES_INDEX, id=doc_id):
+    if es.exists(index=source.es_index, id=doc_id):
         return
 
     doc = {
@@ -54,6 +53,7 @@ def index_email(email: dict, pst_filename: str, pst_acl) -> None:
         "filepath":        pst_filename,
         "extension":       ".pst",
         "type":            "email",
+        "source":          source.name,
         "folder":          email.get("folder", ""),
         "title":           email.get("subject", ""),
         "author":          email.get("sender", ""),
@@ -75,17 +75,18 @@ def index_email(email: dict, pst_filename: str, pst_acl) -> None:
             "permissions": pst_acl.permissions,
         },
     }
-    es.index(index=ES_INDEX, id=doc_id, document=doc)
+    es.index(index=source.es_index, id=doc_id, document=doc)
 
 
-def index_pst(pst_path: str) -> None:
+def index_pst(pst_path: str, source: Source | None = None) -> None:
     """
     Indexe l'intégralité d'un fichier PST, ACL héritées du fichier
     source. La lecture réelle du PST (pypff) se fait dans un
     sous-processus utilisant le Python système — voir l'en-tête de
     ce fichier pour l'explication complète.
     """
-    logging.info(f"📂 Ouverture : {pst_path}")
+    source = source if source is not None else get_source(DEFAULT_SOURCE_NAME)
+    logging.info(f"📂 Ouverture : {pst_path} (source '{source.name}')")
 
     pst_acl = extract_acl(pst_path)
 
@@ -118,7 +119,7 @@ def index_pst(pst_path: str) -> None:
         except json.JSONDecodeError:
             continue
         try:
-            index_email(email, pst_path, pst_acl)
+            index_email(email, pst_path, pst_acl, source)
             count += 1
         except Exception as e:
             logging.error(f"  [ERREUR] Email dans {pst_path} : {e}")
