@@ -23,3 +23,14 @@ py7zr==0.21.1
 # Configuration dynamique (extensions et tailles max autorisées),
 # modifiable à chaud sans redémarrer les conteneurs
 redis==5.2.0
+
+# ── Connecteur SQL (sql_indexer.py / sql_worker.py) ───────────
+# SQLAlchemy : couche générique au-dessus de PostgreSQL/MySQL — le choix
+# du type de base se résume au préfixe du DSN (postgresql+psycopg2://
+# vs mysql+pymysql://), une seule logique d'extraction pour les deux.
+SQLAlchemy==2.0.36
+# psycopg2-binary : wheel précompilée, pas de dépendances système à
+# installer dans l'image (contrairement à psycopg2 "source").
+psycopg2-binary==2.9.9
+# PyMySQL : driver MySQL pur Python, pas de dépendances de compilation.
+PyMySQL==1.1.1

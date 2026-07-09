@@ -324,6 +324,82 @@ docker run -d --env-file .env -v /chemin/documents:/documents:ro \
 En pratique, ces conteneurs sont orchestrés par `docsearch-infra` — voir
 son README pour le déploiement complet.
 
+## Connecteur SQL (PostgreSQL / MySQL)
+
+En complément des sources fichiers, une **source SQL** indexe le
+résultat d'une requête (une ligne = un document) dans son propre index
+Elasticsearch, rejoignant le même alias fédéré `ES_SEARCH_ALIAS` que les
+sources fichiers.
+
+```
+app/
+├── sql_sources_config.py  # Registre Redis des sources SQL
+├── sql_indexer.py          # Moteur SQLAlchemy + upsert + réconciliation
+└── sql_worker.py            # Ordonnanceur (polling par source)
+```
+
+### Modèle de synchronisation : re-lecture complète + réconciliation
+
+Il n'existe pas de colonne de curseur fiable sur toutes les requêtes
+visées (jointures, agrégations...) : `sql_worker.py` relit donc
+**intégralement** le résultat de la requête à chaque passage
+(`poll_interval_seconds`, par source) plutôt que de suivre un curseur
+incrémental. Ce même passage sert deux usages à la fois, sans requête
+séparée :
+
+1. **Upsert** de chaque ligne (`doc_id = md5(source:valeur_id_column)`)
+   — jamais de skip-if-existe comme pour les fichiers : une ligne SQL
+   peut changer de contenu sans changer d'identité.
+2. **Réconciliation** : l'ensemble des `doc_id` obtenus est comparé à
+   l'ensemble des documents déjà présents dans l'index ES de la source
+   — tout document ES absent du nouveau résultat est supprimé (ligne
+   supprimée côté base).
+
+Garde-fou de sécurité (`sql_indexer._reconcile`) : si plus de 50 % d'un
+index par ailleurs significatif (≥ 20 documents) devrait être supprimé
+en un seul passage, la suppression est **refusée** et journalisée en
+erreur — plus probablement le signe d'une requête ou d'une connexion
+cassée que de vraies suppressions, mieux vaut laisser l'index
+temporairement obsolète que le purger par erreur.
+
+### Mapping des champs — whitelist explicite
+
+Chaque source déclare la liste des colonnes à indexer, avec leur nom de
+champ ES et leur type (`keyword`, `text`, `long`, `double`, `date`,
+`boolean`) — toute colonne renvoyée par la requête mais absente de ce
+mapping est **ignorée**, pour ne jamais indexer par mégarde une colonne
+sensible présente dans un `SELECT *`.
+
+### Sécurité — identifiants de connexion
+
+`connection_ref` est le **nom** d'une variable d'environnement
+contenant le DSN complet (utilisateur/mot de passe inclus) — jamais le
+DSN lui-même, qui ne transite donc jamais par Redis ni par une commande
+`manage.sh`. Définir cette variable dans `.env` :
+
+```bash
+CLIENTS_DB_DSN=postgresql+psycopg2://user:motdepasse@host:5432/dbname
+```
+
+Utiliser de préférence un compte SQL en **lecture seule**, restreint à
+la ou aux tables interrogées.
+
+### Utilisation
+
+```bash
+# Depuis docsearch-infra :
+./manage.sh add-sql-source clients postgresql CLIENTS_DB_DSN \
+  "SELECT id, nom, email FROM clients WHERE actif = true" id clients_sql \
+  '[{"column":"id","es_field":"id","es_type":"keyword"},
+    {"column":"nom","es_field":"nom","es_type":"text","analyzer":"french"},
+    {"column":"email","es_field":"email","es_type":"keyword"}]' \
+  --poll-interval 300
+
+./manage.sh list-sql-sources
+./manage.sh run-sql-source clients      # passage manuel immédiat
+./manage.sh remove-sql-source clients   # retire du registre, ne supprime pas l'index
+```
+
 ## Points d'attention
 
 - **doc_id harmonisé** : `indexer.py`, `worker.py` et `watcher.py` doivent
