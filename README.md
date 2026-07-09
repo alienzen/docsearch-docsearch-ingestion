@@ -400,6 +400,50 @@ la ou aux tables interrogées.
 ./manage.sh remove-sql-source clients   # retire du registre, ne supprime pas l'index
 ```
 
+## Connecteur web (Elastic Open Web Crawler)
+
+Une **source web** indexe le contenu d'un site externe, crawlé par
+[Elastic Open Web Crawler](https://github.com/elastic/crawler) (service
+Docker séparé, un fichier de config YAML par site sous
+`docsearch-infra/crawlers/`). Le crawler écrit dans son propre index ES
+intermédiaire (`crawl_index`, schéma brut : `url`, `title`, `body`,
+`last_crawled_at`...) — jamais directement dans l'alias fédéré.
+
+```
+app/
+├── web_sources_config.py  # Registre Redis des sources web (crawl_index -> es_index)
+├── web_indexer.py           # Transformation crawl_index -> schéma DocSearch + réconciliation
+└── web_worker.py             # Ordonnanceur (polling par source)
+```
+
+### Modèle de synchronisation
+
+Même principe que le connecteur SQL : `web_worker.py` relit
+**intégralement** `crawl_index` à chaque passage (`poll_interval_seconds`)
+plutôt qu'un curseur incrémental — le crawler gère déjà lui-même la purge
+de son propre index (deux passages sans revoir une page = suppression),
+`web_indexer.py` n'a donc qu'à répercuter les disparitions vers l'index
+DocSearch final. `doc_id = md5(url)`. Même garde-fou de sécurité que
+`sql_indexer._reconcile` (refus de purger si > 50 % d'un index par
+ailleurs significatif disparaîtrait en un seul passage).
+
+Le contenu web est marqué `acl.public = true` par défaut (site accessible
+sans authentification) — `--private` à l'ajout de la source pour l'inverse.
+
+### Utilisation
+
+```bash
+# 1. Écrire la config du crawler : docsearch-infra/crawlers/<nom>.yml
+#    (output_index = le crawl_index qu'on va déclarer à l'étape 2)
+
+# 2. Depuis docsearch-infra :
+./manage.sh add-web-source cc_decisions cc_decisions_raw cc_decisions --poll-interval 3600
+
+./manage.sh list-web-sources
+./manage.sh run-web-source cc_decisions      # passage manuel immédiat (après un premier crawl)
+./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
+```
+
 ## Points d'attention
 
 - **doc_id harmonisé** : `indexer.py`, `worker.py` et `watcher.py` doivent
