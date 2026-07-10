@@ -75,6 +75,8 @@ def start_web_worker():
                     in_flight.pop(name)
 
             for name, source in get_sources().items():
+                if source.paused:
+                    continue  # suspendue via set_paused() / l'admin (panneau "Sources web")
                 if name in in_flight:
                     continue  # passage précédent encore en cours
                 elapsed = now - last_run.get(name, 0)
