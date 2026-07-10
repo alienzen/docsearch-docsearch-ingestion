@@ -25,9 +25,10 @@
 # Sécurité — IMPORTANT : `connection_ref` est le NOM d'une variable
 # d'environnement contenant le DSN complet (utilisateur/mot de passe
 # inclus), jamais le DSN lui-même. Le DSN ne transite donc jamais par
-# Redis ni par une commande manage.sh — seule la variable d'environnement
-# (définie dans .env, chargée via env_file par le service sql-worker)
-# le contient. Voir sql_indexer.py:_resolve_dsn().
+# Redis ni par ce module — docsearch-api n'a d'ailleurs jamais besoin de
+# résoudre le DSN (aucune connexion SQL n'est faite depuis l'API :
+# seul sql-worker/sql_indexer.py, côté docsearch-ingestion, se connecte
+# réellement aux bases). Voir docsearch-ingestion/app/sql_indexer.py.
 #
 # Contrairement à sources_config.py, il n'existe PAS de source par défaut
 # : une installation sans source SQL enregistrée n'en a simplement aucune
@@ -78,6 +79,7 @@ class SqlSource:
     id_column: str
     es_index: str
     poll_interval_seconds: int
+    searchable: bool = True
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
 
@@ -152,6 +154,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         id_column=entry["id_column"],
         es_index=entry["es_index"],
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
+        searchable=entry.get("searchable", True),
         fields=fields,
     )
 
@@ -238,6 +241,7 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, db_type: str, connection_ref: str, query: str, id_column: str,
     es_index: str, fields: list[dict], poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    searchable: bool = True,
 ) -> dict:
     """
     Enregistre une nouvelle source SQL (ou met à jour une source
@@ -282,8 +286,24 @@ def add_source(
             "id_column":             id_column,
             "es_index":              es_index,
             "poll_interval_seconds": poll_interval_seconds,
+            "searchable":            searchable,
             "fields":                fields,
         }
+
+    return _read_write(mutate)
+
+
+def set_searchable(name: str, searchable: bool) -> dict:
+    """
+    Active/désactive la RECHERCHE pour une source SQL, sans toucher à
+    l'ingestion : sql_worker.py continue d'interroger la base à son
+    intervalle normal, seuls ses documents cessent d'apparaître dans
+    /search (docsearch-api).
+    """
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["searchable"] = searchable
 
     return _read_write(mutate)
 
