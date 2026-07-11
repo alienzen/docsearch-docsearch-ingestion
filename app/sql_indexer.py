@@ -32,6 +32,7 @@ from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 
 from sources_config import ES_SEARCH_ALIAS
 from sql_sources_config import SqlSource
+import sql_dsn_registry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,20 +70,30 @@ _engines: dict[str, tuple[str, object]] = {}
 
 
 def _resolve_dsn(source: SqlSource) -> str:
+    # Variable d'environnement d'abord, TOUJOURS prioritaire si elle existe
+    # (compatibilité totale avec les déploiements existants — voir
+    # docsearch-infra/.env). Repli sur le registre chiffré (Redis, ajouté
+    # depuis le panneau d'administration) uniquement si ABSENTE ou VIDE.
     dsn = os.environ.get(source.connection_ref)
+    origin = "variable d'environnement"
+    if not dsn:
+        dsn = sql_dsn_registry.resolve_dsn(source.connection_ref)
+        origin = "DSN dynamique (panneau d'administration)"
     if not dsn:
         raise RuntimeError(
-            f"Variable d'environnement '{source.connection_ref}' absente ou vide — "
-            f"impossible de se connecter pour la source SQL '{source.name}'. Elle doit "
-            f"contenir le DSN complet (ex: postgresql+psycopg2://user:pass@host:5432/db), "
-            f"jamais stocké dans Redis ni dans manage.sh."
+            f"Aucun DSN disponible pour '{source.connection_ref}' — impossible de se "
+            f"connecter pour la source SQL '{source.name}'. Fournissez soit une variable "
+            f"d'environnement '{source.connection_ref}' contenant le DSN complet (ex: "
+            f"postgresql+psycopg2://user:pass@host:5432/db, jamais stocké dans Redis ni "
+            f"dans manage.sh), soit un DSN enregistré sous ce nom depuis le panneau "
+            f"d'administration (Sources SQL > DSN chiffrés)."
         )
     prefixes = _DSN_PREFIXES[source.db_type]
     if not dsn.startswith(prefixes):
         raise RuntimeError(
-            f"Le DSN de '{source.connection_ref}' ne correspond pas au db_type déclaré "
-            f"('{source.db_type}') pour la source '{source.name}' — attendu un préfixe "
-            f"parmi {prefixes}."
+            f"Le DSN de '{source.connection_ref}' (résolu via {origin}) ne correspond pas "
+            f"au db_type déclaré ('{source.db_type}') pour la source '{source.name}' — "
+            f"attendu un préfixe parmi {prefixes}."
         )
     return dsn
 

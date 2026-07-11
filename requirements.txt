@@ -34,3 +34,6 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.9
 # PyMySQL : driver MySQL pur Python, pas de dépendances de compilation.
 PyMySQL==1.1.1
+# Déchiffrement des DSN dynamiques enregistrés via le panneau d'administration
+# (sql_dsn_registry.py) — même clé DSN_ENCRYPTION_KEY que docsearch-api
+cryptography==49.0.0
