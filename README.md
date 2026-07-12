@@ -384,6 +384,29 @@ CLIENTS_DB_DSN=postgresql+psycopg2://user:motdepasse@host:5432/dbname
 Utiliser de préférence un compte SQL en **lecture seule**, restreint à
 la ou aux tables interrogées.
 
+### Alternative — DSN chiffré via le panneau d'administration
+
+En complément de la méthode ci-dessus (variable d'environnement dans
+`.env`), un administrateur peut enregistrer un DSN directement depuis le
+panneau web (`Sources SQL > DSN chiffrés`, `POST /admin/sql-dsns`) — sans
+accès SSH/hôte, sans recréer aucun conteneur. Le DSN est chiffré (Fernet,
+symétrique) avant d'être stocké dans Redis, jamais en clair, jamais
+réaffiché ensuite (seul un indice schéma + hôte, sans identifiants, reste
+consultable via `GET /admin/sql-dsns`).
+
+**Aucune des deux méthodes n'est dépréciée** : `connection_ref` peut être
+le nom d'une variable d'environnement (méthode ci-dessus) OU le nom d'un
+DSN enregistré par cette méthode. La variable d'environnement reste
+**toujours prioritaire** si elle existe pour le même nom — voir
+`sql_indexer.py::_resolve_dsn`.
+
+Nécessite `DSN_ENCRYPTION_KEY` définie, à l'identique, sur docsearch-api
+(chiffrement à l'écriture) et sur `sql-worker`/`indexer-init`
+(déchiffrement à la connexion) — voir `docsearch-infra/.env.example` pour
+comment la générer. Voir `app/sql_dsn_registry.py` pour l'implémentation
+(registre Redis indépendant de `sql_sources_config.py`, clé
+`docsearch:config:sql_dsns`).
+
 ### Utilisation
 
 ```bash
