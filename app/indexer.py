@@ -7,6 +7,7 @@ TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 
 import hashlib
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -86,6 +87,14 @@ def create_index(source: Source | None = None):
                     # exact utilisé par les facettes/chips de l'interface.
                     "fields": {"text": {"type": "text"}},
                 },
+                # Mots-clés du document (propriété "Keywords"/"Mots-clés"
+                # des métadonnées Office/PDF, voir get_keywords()) — même
+                # motif que author : keyword pour la facette/le filtre
+                # exact, sous-champ .text pour la recherche libre partielle.
+                "keywords":    {
+                    "type": "keyword",
+                    "fields": {"text": {"type": "text"}},
+                },
                 "size":        {"type": "long"},
                 "date_created":  {"type": "date"},
                 "date_modified": {"type": "date"},
@@ -143,6 +152,18 @@ def create_index(source: Source | None = None):
     if not es.indices.exists(index=source.es_index):
         es.indices.create(index=source.es_index, body=mapping)
         logging.info(f"Index '{source.es_index}' créé avec support ACL (source '{source.name}').")
+    else:
+        # Index déjà existant (installation en place) : on applique quand
+        # même les `properties` du mapping via put_mapping — ES traite
+        # l'ajout d'un champ absent comme une opération additive sans
+        # danger (pas de réindexation, aucune donnée existante touchée),
+        # et refuse silencieusement rien de plus qu'une incompatibilité de
+        # type sur un champ déjà défini. Ça permet à create_index() de
+        # rester auto-réparatrice pour tout nouveau champ ajouté ici sans
+        # exiger de script de migration séparé : un simple
+        # `./manage.sh init <source>` (qui appelle create_index() via
+        # producer.py) suffit à propager un nouveau champ de mapping.
+        es.indices.put_mapping(index=source.es_index, properties=mapping["mappings"]["properties"])
 
     # Rejoint l'alias fédéré — c'est ce qui permet à docsearch-api de
     # chercher sur toutes les sources sans connaître leurs noms d'index
@@ -194,6 +215,22 @@ def get_author(metadata: dict) -> str:
 
 def get_title(metadata: dict, fallback: str) -> str:
     return metadata.get("dc:title") or metadata.get("office:title") or fallback
+
+
+def get_keywords(metadata: dict) -> list[str]:
+    """
+    Mots-clés du document (propriété "Mots-clés"/"Keywords" des
+    métadonnées Office/PDF). dc:subject est délibérément exclu : vérifié
+    empiriquement contre Tika 3.3.1 que ce champ fusionne à la fois le
+    Sujet ET les Mots-clés dans un même tableau, sans distinction —
+    pdf:docinfo:keywords (PDF) et meta:keyword (Office OOXML docx/xlsx/
+    pptx via cp:keywords, et legacy doc/xls/ppt via SummaryInformation)
+    sont les seules sources fiables.
+    """
+    raw = _first_metadata_value(metadata, ("pdf:docinfo:keywords", "meta:keyword"))
+    if not raw:
+        return []
+    return [kw.strip() for kw in re.split(r"[;,]", raw) if kw.strip()]
 
 
 def _first_metadata_value(metadata: dict, keys: tuple[str, ...]) -> str | None:
@@ -334,6 +371,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         "content":    content,
         "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
+        "keywords":   get_keywords(metadata),
         "date_created":  get_date_created(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
         "date_modified": get_date_modified(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
         "folder":     folder,

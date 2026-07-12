@@ -19,7 +19,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields
+from indexer import get_author, get_title, get_keywords, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -85,6 +85,7 @@ def build_action(filepath: str, content: str, metadata: dict, extension: str, so
             "content":        content,
             "title":          get_title(metadata, path.stem),
             "author":         get_author(metadata),
+            "keywords":       get_keywords(metadata),
             "date_created":   get_date_created(metadata, fallback_path=path if path.exists() else None),
             "date_modified":  get_date_modified(metadata, fallback_path=path if path.exists() else None),
             "folder":         folder,
