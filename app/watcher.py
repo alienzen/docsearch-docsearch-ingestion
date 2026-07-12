@@ -5,6 +5,10 @@ import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
+# Même nom de variable et même défaut que docsearch-api/saved_collections.py
+# — les deux services doivent s'accorder sur le nom de cet index pour que
+# la réconciliation (voir _reconcile_collections) trouve la bonne cible.
+SAVED_COLLECTIONS_INDEX = os.getenv("SAVED_COLLECTIONS_INDEX", "saved_collections")
 
 import time
 import logging
@@ -13,7 +17,7 @@ import json
 from pathlib import Path
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 from acl_extractor import extract_acl, FileACL
 from indexer import index_file, is_excluded, relative_to_docs_folder
 from archive_extractor import is_archive
@@ -164,7 +168,66 @@ def _copy_document(old_identity: str, new_identity: str, source: Source, updated
 
     es.index(index=source.es_index, id=new_id, document=new_doc)
     es.delete(index=source.es_index, id=old_id, refresh=True)
+    _reconcile_collections({old_id: new_id})
     return True
+
+
+def _reconcile_collections(id_map: dict[str, str]):
+    """
+    Après un renommage/déplacement détecté comme tel (pas de réextraction
+    Tika, mais un nouvel _id — voir file_hash), met à jour les collections
+    utilisateur (docsearch-api/saved_collections.py) qui référencent
+    l'ancien doc_id pour qu'elles pointent vers le nouveau, sans quoi
+    l'entrée resterait affichée comme "Document indisponible" côté UI.
+
+    Écrit directement dans l'index ES `saved_collections` plutôt que
+    d'appeler docsearch-api en HTTP : les deux services partagent déjà de
+    l'infra sans passer par l'API l'un de l'autre (voir filetype_config.py/
+    runtime_config.py côté Redis) — ça évite d'ajouter une dépendance HTTP
+    et un mécanisme d'authentification machine-à-machine à ce conteneur
+    pour ce seul besoin.
+
+    Best-effort et jamais bloquant : une collection est un confort
+    utilisateur, pas la donnée de vérité du document (voir
+    saved_collections.py) — un échec ici est loggé mais ne doit jamais
+    faire échouer le renommage lui-même, déjà effectué à ce stade.
+
+    Ne couvre QUE les renommages détectés comme tels par watchdog
+    (on_moved) — le repli suppression+création (déplacement inter-source,
+    outil qui copie puis supprime) ne passe jamais par cette fonction :
+    à ce moment-là, aucun code ne connaît plus la correspondance entre
+    l'ancien et le nouvel identifiant.
+    """
+    if not id_map:
+        return
+    try:
+        resp = es.search(
+            index=SAVED_COLLECTIONS_INDEX,
+            query={"terms": {"doc_ids": list(id_map)}},
+            # Même principe que _rename_prefix : pagination simple,
+            # suffisante pour un volume de collections raisonnable.
+            size=1000,
+        )
+    except NotFoundError:
+        return  # aucune collection créée pour l'instant — rien à réconcilier
+    except Exception as e:
+        logging.warning(f"[reconcile] Recherche des collections impossible : {e}")
+        return
+
+    updated = 0
+    for hit in resp["hits"]["hits"]:
+        doc_ids = hit["_source"].get("doc_ids", [])
+        new_doc_ids = [id_map.get(d, d) for d in doc_ids]
+        if new_doc_ids == doc_ids:
+            continue
+        try:
+            es.update(index=SAVED_COLLECTIONS_INDEX, id=hit["_id"], doc={"doc_ids": new_doc_ids})
+            updated += 1
+        except Exception as e:
+            logging.warning(f"[reconcile] Mise à jour de la collection {hit['_id']} impossible : {e}")
+
+    if updated:
+        logging.info(f"🔗 {updated} collection(s) réconciliée(s) après renommage ({len(id_map)} document(s) déplacé(s))")
 
 
 def _new_path_allowed(new_path: str, source: Source) -> bool:
@@ -208,6 +271,7 @@ def _rename_prefix(old_root: str, new_root: str, source: Source) -> int:
         }
     }
     renamed, removed = 0, 0
+    id_map: dict[str, str] = {}
     try:
         resp = es.search(index=source.es_index, query=query, size=1000)
     except Exception as e:
@@ -235,6 +299,7 @@ def _rename_prefix(old_root: str, new_root: str, source: Source) -> int:
             es.index(index=source.es_index, id=new_id, document=doc)
             es.delete(index=source.es_index, id=old_id)
             renamed += 1
+            id_map[old_id] = new_id
         except Exception as e:
             logging.error(f"Erreur renommage ({old_path} -> {new_path}) : {e}")
 
@@ -242,6 +307,7 @@ def _rename_prefix(old_root: str, new_root: str, source: Source) -> int:
         es.indices.refresh(index=source.es_index)
     if removed:
         logging.info(f"   ({removed} document(s) retiré(s) car nouvel emplacement exclu)")
+    _reconcile_collections(id_map)
     return renamed
 
 
@@ -249,6 +315,7 @@ def _rename_archive_members(old_root: str, new_root: str, source: Source, update
     """Renomme tous les membres indexés d'une archive déplacée/renommée."""
     query = {"prefix": {"filepath": f"{old_root}::"}}
     renamed = 0
+    id_map: dict[str, str] = {}
     try:
         resp = es.search(index=source.es_index, query=query, size=1000)
     except Exception as e:
@@ -275,11 +342,13 @@ def _rename_archive_members(old_root: str, new_root: str, source: Source, update
             es.index(index=source.es_index, id=new_id, document=doc)
             es.delete(index=source.es_index, id=old_id)
             renamed += 1
+            id_map[old_id] = new_id
         except Exception as e:
             logging.error(f"Erreur renommage membre ({old_id}) : {e}")
 
     if renamed:
         es.indices.refresh(index=source.es_index)
+    _reconcile_collections(id_map)
     return renamed
 
 
