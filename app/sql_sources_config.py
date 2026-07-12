@@ -1,5 +1,14 @@
 # sql_sources_config.py — Registre dynamique des sources SQL
 #
+# Port de docsearch-ingestion/app/sql_sources_config.py — dupliqué à
+# l'identique ici (impossible d'importer un autre dépôt dans
+# l'architecture multi-dépôts, même rationale que file_sources_config.py /
+# admin_scan.py). Ce module est totalement autonome (Redis + variables
+# d'environnement, aucune dépendance vers le reste de l'ingestion) : il
+# peut être copié tel quel entre les deux dépôts sans adaptation.
+# COPIE SYNCHRONISÉE — toute modification doit être répercutée dans les
+# DEUX dépôts (docsearch-api ET docsearch-ingestion).
+#
 # Une "source SQL" = une requête SELECT sur une base PostgreSQL ou MySQL,
 # dont chaque ligne devient un document dans son propre index Elasticsearch.
 # Même principe que file_sources_config.py (registre vivant dans Redis, relu à
@@ -81,6 +90,7 @@ class SqlSource:
     poll_interval_seconds: int
     label: str = ""
     searchable: bool = True
+    collectable: bool = True
     description: str = ""
     fields: tuple[FieldMapping, ...] = field(default_factory=tuple)
 
@@ -158,6 +168,7 @@ def _to_source(name: str, entry: dict) -> SqlSource:
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         fields=fields,
     )
@@ -245,13 +256,20 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, db_type: str, connection_ref: str, query: str, id_column: str,
     es_index: str, fields: list[dict], poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    label: str | None = None, searchable: bool = True, description: str | None = None,
+    label: str | None = None, searchable: bool = True, collectable: bool = True,
+    description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source SQL (ou met à jour une source
     existante du même nom). `fields` est la liste de mapping explicite
     colonne -> champ ES (voir _validate_fields) — aucune colonne
     renvoyée par `query` mais absente de cette liste ne sera indexée.
+
+    ATTENTION : REMPLACE entièrement l'entrée existante (pas de fusion
+    partielle) — un appelant qui réenregistre une source déjà configurée
+    doit relire `searchable`/`collectable` au préalable (voir
+    /admin/all-sources) et les repasser explicitement, sous peine de les
+    réinitialiser à True.
     """
     _validate_name(name, "Nom de source")
     _validate_name(es_index, "Nom d'index Elasticsearch")
@@ -292,6 +310,7 @@ def add_source(
             "poll_interval_seconds": poll_interval_seconds,
             "label":                 label or name,
             "searchable":            searchable,
+            "collectable":           collectable,
             "description":           description or "",
             "fields":                fields,
         }
@@ -310,6 +329,18 @@ def set_searchable(name: str, searchable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source SQL inconnue : '{name}'")
         sources[name]["searchable"] = searchable
+
+    return _read_write(mutate)
+
+
+def set_collectable(name: str, collectable: bool) -> dict:
+    """Active/désactive l'ajout des documents de cette source SQL à une
+    collection — voir file_sources_config.set_collectable() pour le
+    détail, même principe."""
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source SQL inconnue : '{name}'")
+        sources[name]["collectable"] = collectable
 
     return _read_write(mutate)
 

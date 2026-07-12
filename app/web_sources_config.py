@@ -1,5 +1,13 @@
 # web_sources_config.py — Registre dynamique des sources web
 #
+# Port de docsearch-ingestion/app/web_sources_config.py — dupliqué à
+# l'identique ici (impossible d'importer un autre dépôt dans l'architecture
+# multi-dépôts, même rationale que sql_sources_config.py). Ce module est
+# totalement autonome (Redis uniquement, aucune dépendance vers le reste de
+# l'ingestion) : il peut être copié tel quel entre les deux dépôts sans
+# adaptation. COPIE SYNCHRONISÉE — toute modification doit être répercutée
+# dans les DEUX dépôts (docsearch-api ET docsearch-ingestion).
+#
 # Une "source web" = un site crawlé par Elastic Open Web Crawler vers un
 # index Elasticsearch INTERMÉDIAIRE (son propre schéma : url, title, body,
 # headings, meta_description, last_crawled_at...), que web_indexer.py relit
@@ -57,6 +65,7 @@ class WebSource:
     poll_interval_seconds: int
     label: str = ""
     searchable: bool = True
+    collectable: bool = True
     description: str = ""
     paused: bool = False  # web_worker.py saute cette source tant que True (voir set_paused)
 
@@ -124,6 +133,7 @@ def _to_source(name: str, entry: dict) -> WebSource:
         poll_interval_seconds=int(entry.get("poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS)),
         label=entry.get("label") or name,
         searchable=entry.get("searchable", True),
+        collectable=entry.get("collectable", True),
         description=entry.get("description") or "",
         paused=entry.get("paused", False),
     )
@@ -174,7 +184,8 @@ def _read_write(mutate) -> dict:
 def add_source(
     name: str, crawl_index: str, es_index: str,
     acl_public: bool = True, poll_interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
-    label: str | None = None, searchable: bool = True, description: str | None = None,
+    label: str | None = None, searchable: bool = True, collectable: bool = True,
+    description: str | None = None,
 ) -> dict:
     """
     Enregistre une nouvelle source web (ou met à jour une source existante
@@ -182,6 +193,12 @@ def add_source(
     config Elastic Open Web Crawler pour ce site — jamais le même index que
     `es_index` (l'un est le format brut du crawler, l'autre le schéma
     DocSearch final).
+
+    ATTENTION : REMPLACE entièrement l'entrée existante (pas de fusion
+    partielle) — un appelant qui réenregistre une source déjà configurée
+    doit relire `searchable`/`collectable` au préalable (voir
+    /admin/all-sources) et les repasser explicitement, sous peine de les
+    réinitialiser à True.
     """
     _validate_name(name, "Nom de source")
     _validate_name(crawl_index, "Nom d'index de crawl")
@@ -222,6 +239,7 @@ def add_source(
             "poll_interval_seconds":  poll_interval_seconds,
             "label":                  label or name,
             "searchable":             searchable,
+            "collectable":            collectable,
             "description":            description or "",
         }
 
@@ -239,6 +257,18 @@ def set_searchable(name: str, searchable: bool) -> dict:
         if name not in sources:
             raise KeyError(f"Source web inconnue : '{name}'")
         sources[name]["searchable"] = searchable
+
+    return _read_write(mutate)
+
+
+def set_collectable(name: str, collectable: bool) -> dict:
+    """Active/désactive l'ajout des documents de cette source web à une
+    collection — voir file_sources_config.set_collectable() pour le
+    détail, même principe."""
+    def mutate(sources):
+        if name not in sources:
+            raise KeyError(f"Source web inconnue : '{name}'")
+        sources[name]["collectable"] = collectable
 
     return _read_write(mutate)
 
