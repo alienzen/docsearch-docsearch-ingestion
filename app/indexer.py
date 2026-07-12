@@ -4,6 +4,9 @@
 import os
 ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 TIKA_SERVERS = os.getenv("TIKA_SERVERS", "http://localhost:9998").split(",")
+# Même nom de variable et même défaut que docsearch-api/custom_keywords.py
+# — voir apply_keyword_overrides() plus bas.
+CUSTOM_KEYWORDS_INDEX = os.getenv("CUSTOM_KEYWORDS_INDEX", "custom_keywords")
 
 import hashlib
 import logging
@@ -233,6 +236,32 @@ def get_keywords(metadata: dict) -> list[str]:
     return [kw.strip() for kw in re.split(r"[;,]", raw) if kw.strip()]
 
 
+def apply_keyword_overrides(doc_id: str, keywords: list[str]) -> list[str]:
+    """
+    Réapplique par-dessus les mots-clés fraîchement extraits par Tika les
+    ajouts/retraits qu'un utilisateur a faits à la main (docsearch-api/
+    custom_keywords.py, POST/DELETE /document/{id}/keywords) — sans ça,
+    toute réindexation (fichier modifié détecté par le watcher, ou
+    ./manage.sh init relancé) écraserait silencieusement ces modifications,
+    puisque get_keywords() ne connaît que les métadonnées du fichier et
+    worker.py réécrit le document entier à chaque passage.
+
+    Best-effort : aucune surcharge enregistrée (cas normal) ou ES/index
+    injoignable ne doit jamais empêcher l'indexation elle-même — on
+    retombe simplement sur les mots-clés Tika bruts.
+    """
+    try:
+        entry = es.get(index=CUSTOM_KEYWORDS_INDEX, id=doc_id)["_source"]
+    except Exception:
+        return keywords
+    removed = set(entry.get("removed", []))
+    merged = [kw for kw in keywords if kw not in removed]
+    for kw in entry.get("added", []):
+        if kw not in merged:
+            merged.append(kw)
+    return merged
+
+
 def _first_metadata_value(metadata: dict, keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = metadata.get(key)
@@ -371,7 +400,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         "content":    content,
         "title":      get_title(metadata, Path(filename).stem),
         "author":     get_author(metadata),
-        "keywords":   get_keywords(metadata),
+        "keywords":   apply_keyword_overrides(doc_id, get_keywords(metadata)),
         "date_created":  get_date_created(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
         "date_modified": get_date_modified(metadata, fallback_path=tika_path if Path(tika_path).exists() else None),
         "folder":     folder,

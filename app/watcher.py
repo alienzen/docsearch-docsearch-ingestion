@@ -9,6 +9,9 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 # — les deux services doivent s'accorder sur le nom de cet index pour que
 # la réconciliation (voir _reconcile_collections) trouve la bonne cible.
 SAVED_COLLECTIONS_INDEX = os.getenv("SAVED_COLLECTIONS_INDEX", "saved_collections")
+# Idem pour les surcharges de mots-clés personnalisés — voir
+# _migrate_custom_keyword_overrides() et docsearch-api/custom_keywords.py.
+CUSTOM_KEYWORDS_INDEX = os.getenv("CUSTOM_KEYWORDS_INDEX", "custom_keywords")
 
 import time
 import logging
@@ -168,7 +171,7 @@ def _copy_document(old_identity: str, new_identity: str, source: Source, updated
 
     es.index(index=source.es_index, id=new_id, document=new_doc)
     es.delete(index=source.es_index, id=old_id, refresh=True)
-    _reconcile_collections({old_id: new_id})
+    _reconcile_doc_id_references({old_id: new_id})
     return True
 
 
@@ -228,6 +231,43 @@ def _reconcile_collections(id_map: dict[str, str]):
 
     if updated:
         logging.info(f"🔗 {updated} collection(s) réconciliée(s) après renommage ({len(id_map)} document(s) déplacé(s))")
+
+
+def _migrate_custom_keyword_overrides(id_map: dict[str, str]):
+    """
+    Même besoin que _reconcile_collections, pour l'index custom_keywords
+    (docsearch-api/custom_keywords.py) — mais plus simple : un seul
+    document par doc_id (pas une liste de références à parcourir), donc un
+    simple déplacement par id plutôt qu'une recherche + réécriture.
+    """
+    if not id_map:
+        return
+    migrated = 0
+    for old_id, new_id in id_map.items():
+        try:
+            entry = es.get(index=CUSTOM_KEYWORDS_INDEX, id=old_id)["_source"]
+        except NotFoundError:
+            continue
+        except Exception as e:
+            logging.warning(f"[reconcile] Lecture surcharge mots-clés impossible ({old_id}) : {e}")
+            continue
+        try:
+            es.index(index=CUSTOM_KEYWORDS_INDEX, id=new_id, document=entry)
+            es.delete(index=CUSTOM_KEYWORDS_INDEX, id=old_id)
+            migrated += 1
+        except Exception as e:
+            logging.warning(f"[reconcile] Migration surcharge mots-clés impossible ({old_id} → {new_id}) : {e}")
+
+    if migrated:
+        logging.info(f"🏷️  {migrated} surcharge(s) de mots-clés migrée(s) après renommage")
+
+
+def _reconcile_doc_id_references(id_map: dict[str, str]):
+    """Point d'entrée unique appelé après un renommage détecté (voir
+    _copy_document/_rename_prefix/_rename_archive_members) — regroupe
+    toutes les données annexes qui référencent un doc_id devenu obsolète."""
+    _reconcile_collections(id_map)
+    _migrate_custom_keyword_overrides(id_map)
 
 
 def _new_path_allowed(new_path: str, source: Source) -> bool:
@@ -307,7 +347,7 @@ def _rename_prefix(old_root: str, new_root: str, source: Source) -> int:
         es.indices.refresh(index=source.es_index)
     if removed:
         logging.info(f"   ({removed} document(s) retiré(s) car nouvel emplacement exclu)")
-    _reconcile_collections(id_map)
+    _reconcile_doc_id_references(id_map)
     return renamed
 
 
@@ -348,7 +388,7 @@ def _rename_archive_members(old_root: str, new_root: str, source: Source, update
 
     if renamed:
         es.indices.refresh(index=source.es_index)
-    _reconcile_collections(id_map)
+    _reconcile_doc_id_references(id_map)
     return renamed
 
 
