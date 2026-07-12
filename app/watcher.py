@@ -20,7 +20,7 @@ from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
 from path_filter import is_path_allowed
-from sources_config import Source, get_sources
+from file_sources_config import Source, get_sources
 
 # ── Battement de cœur (pour le panneau d'administration) ──────
 # Écrit l'heure du dernier cycle de surveillance dans Redis, afin que
@@ -285,7 +285,7 @@ def _rename_archive_members(old_root: str, new_root: str, source: Source, update
 
 class DocumentHandler(FileSystemEventHandler):
     """
-    Un DocumentHandler est lié à UNE SEULE source (voir sources_config.py)
+    Un DocumentHandler est lié à UNE SEULE source (voir file_sources_config.py)
     — chaque source surveillée a son propre observateur watchdog et sa
     propre instance de ce handler, pour que tous les appels ES/Kafka
     qu'il déclenche ciblent le bon index et le bon dossier de référence.
@@ -448,12 +448,12 @@ class DocumentHandler(FileSystemEventHandler):
 
 def start_watcher():
     """
-    Surveille TOUTES les sources enregistrées (sources_config.py)
+    Surveille TOUTES les sources enregistrées (file_sources_config.py)
     simultanément — un PollingObserver + un DocumentHandler par source,
     démarré/arrêté dynamiquement à chaque itération de la boucle
     principale en fonction du registre courant. C'est ce qui permet
     d'ajouter (ou de retirer) une source à chaud, sans redémarrer ce
-    conteneur : ./manage.sh add-source suffit, ce process la détecte
+    conteneur : ./manage.sh add-file-source suffit, ce process la détecte
     dans les ~5s qui suivent.
 
     PollingObserver est requis pour les partages réseau (CIFS, NFS, SMB)
@@ -485,7 +485,7 @@ def start_watcher():
     def _sync_sources(interval: int):
         """Démarre/arrête les observateurs pour coller au registre
         courant. Redémarre aussi un observateur dont le dossier a
-        changé (rare : équivaut à changer subfolder via add-source sur
+        changé (rare : équivaut à changer subfolder via add-file-source sur
         une source déjà active)."""
         sources = get_sources()
 

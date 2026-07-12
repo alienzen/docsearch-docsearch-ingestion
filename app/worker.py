@@ -23,7 +23,7 @@ from indexer import get_author, get_title, is_excluded, index_archive, get_date_
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
-from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
+from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 # WORKER_BATCH_SIZE (Kafka max_poll_records) reste fixé au démarrage :
 # changer cette valeur nécessite de recréer le KafkaConsumer, donc un
@@ -157,7 +157,7 @@ def run_worker(batch_size: int = BATCH):
                     except KeyError as e:
                         # Source retirée du registre entre la publication
                         # et la consommation du message (course rare mais
-                        # possible avec remove-source) : on abandonne ce
+                        # possible avec remove-file-source) : on abandonne ce
                         # message plutôt que de planter le worker.
                         logging.warning(f"[IGNORÉ] {filepath} — {e}")
                         continue

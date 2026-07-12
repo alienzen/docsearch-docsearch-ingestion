@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 
 from elasticsearch import Elasticsearch
 from acl_extractor import extract_acl
-from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
+from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PST] %(message)s")
 

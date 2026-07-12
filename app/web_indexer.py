@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 
-from sources_config import ES_SEARCH_ALIAS
+from file_sources_config import ES_SEARCH_ALIAS
 from web_sources_config import WebSource
 
 logging.basicConfig(

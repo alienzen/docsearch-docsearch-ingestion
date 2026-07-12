@@ -1,6 +1,6 @@
 # producer.py — Producer Kafka pour l'indexation parallèle
 #
-# Rôle : parcourir le dossier d'une SOURCE (sources_config.py) et publier
+# Rôle : parcourir le dossier d'une SOURCE (file_sources_config.py) et publier
 # une référence de chaque fichier à indexer sur le topic Kafka
 # "documents-to-index". Les workers (worker.py, plusieurs instances en
 # parallèle) consomment ce topic et font le travail lourd (extraction
@@ -38,7 +38,7 @@ from indexer import is_excluded, create_index, optimize_for_bulk, restore_after_
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from path_filter import is_path_allowed, is_dir_excluded
-from sources_config import Source, get_source, DEFAULT_SOURCE_NAME
+from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME
 
 KAFKA_WORKER_GROUP = "indexer-workers"
 

@@ -20,7 +20,7 @@ from archive_extractor import (
 )
 from filetype_config import is_allowed, get_enabled_extensions
 from path_filter import is_path_allowed, matches_pattern
-from sources_config import Source, get_source, DEFAULT_SOURCE_NAME, ES_SEARCH_ALIAS
+from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME, ES_SEARCH_ALIAS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +51,7 @@ SUPPORTED = {".doc", ".docx", ".ppt", ".pptx",
 def _resolve_source(source: Source | None) -> Source:
     """La plupart des fonctions de ce module acceptent `source=None` pour
     les points d'entrée CLI/tests mono-source : repli sur la source par
-    défaut ('documents'), qui existe toujours (voir sources_config.py)."""
+    défaut ('documents'), qui existe toujours (voir file_sources_config.py)."""
     return source if source is not None else get_source(DEFAULT_SOURCE_NAME)
 
 
@@ -72,7 +72,7 @@ def create_index(source: Source | None = None):
                 },
                 "extension":   {"type": "keyword"},
                 "type":        {"type": "keyword"},
-                # Nom de la source d'origine (sources_config.py) — permet
+                # Nom de la source d'origine (file_sources_config.py) — permet
                 # de filtrer/facetter une recherche fédérée sur plusieurs
                 # index sans avoir à connaître les noms d'index bruts.
                 "source":      {"type": "keyword"},
