@@ -22,7 +22,7 @@ from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch, NotFoundError
 from acl_extractor import extract_acl, FileACL
-from indexer import index_file, is_excluded, relative_to_docs_folder
+from indexer import index_file, is_excluded, relative_to_docs_folder, create_index
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions
 from runtime_config import get_param
@@ -611,6 +611,17 @@ def start_watcher():
                         f"({source.folder}) — surveillance différée jusqu'à sa création."
                     )
                     continue
+                # Garantit le mapping ES explicite + l'alias fédéré AVANT
+                # que l'observateur ne puisse déclencher le moindre
+                # événement — jusqu'ici, seul producer.py (donc
+                # ./manage.sh init) appelait create_index() ; un fichier
+                # déposé dans le dossier d'une source jamais "init"
+                # laissait Elasticsearch auto-créer l'index à la première
+                # écriture (mapping dynamique, sans alias), invisible à la
+                # recherche fédérée sans aucune erreur visible. Idempotent
+                # (create ou put_mapping selon l'existant) : sans danger à
+                # rappeler ici même si l'index existe déjà.
+                create_index(source)
                 active[name] = {
                     "observer": _start_observer(source, interval),
                     "folder":   source.folder,
