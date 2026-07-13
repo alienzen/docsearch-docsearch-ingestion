@@ -13,6 +13,7 @@ Fait partie de l'écosystème DocSearch, découpé en plusieurs dépôts :
 | [docsearch-ui](../docsearch-ui) | Interface web statique |
 | [docsearch-infra](../docsearch-infra) | Orchestration Docker Compose |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
+| [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
 
 ## Contenu
 
