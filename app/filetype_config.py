@@ -50,6 +50,18 @@ DEFAULT_CONFIG = {
     "xls":     {"enabled": True,  "max_size_mb": 30},
     "txt":     {"enabled": True,  "max_size_mb": 5},
     "pst":     {"enabled": True,  "max_size_mb": 2000},
+    # Images — désactivées par défaut (activation explicite via
+    # set-filetype, comme documenté dans le README) : leur contenu n'est
+    # réellement cherchable qu'avec l'OCR activé sur la source
+    # concernée (voir file_sources_config.py:Source.ocr_enabled),
+    # coûteux en CPU, donc pas un défaut raisonnable pour toutes les
+    # installations.
+    "jpg":     {"enabled": False, "max_size_mb": 20},
+    "jpeg":    {"enabled": False, "max_size_mb": 20},
+    "png":     {"enabled": False, "max_size_mb": 20},
+    "tiff":    {"enabled": False, "max_size_mb": 20},
+    "tif":     {"enabled": False, "max_size_mb": 20},
+    "bmp":     {"enabled": False, "max_size_mb": 20},
     # Archives — la clé correspond à archive_extractor.archive_kind(),
     # PAS à path.suffix (qui donnerait ".gz" pour "x.tar.gz", pas
     # "tar.gz"). max_size_mb ici limite la taille du FICHIER ARCHIVE

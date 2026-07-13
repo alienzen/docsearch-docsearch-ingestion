@@ -19,7 +19,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields
+from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields, _ocr_headers
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -45,13 +45,14 @@ BATCH      = WORKER_BATCH_SIZE
 es = Elasticsearch(ES_HOST, retry_on_timeout=True, max_retries=3, request_timeout=60)
 
 
-def extract(filepath: str) -> tuple[str, dict]:
+def extract(filepath: str, ocr_enabled: bool = False) -> tuple[str, dict]:
     """Voir indexer.py:extract_text() pour l'explication complète —
     deux appels séparés (service="text" / service="meta") pour éviter
     que les métadonnées des ressources internes (ex: vignette d'un
-    .docx) n'écrasent celles du document principal."""
+    .docx) n'écrasent celles du document principal. `ocr_enabled` voir
+    indexer.py:_ocr_headers()."""
     server = random.choice(TIKA_SVRS)
-    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text")
+    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text", headers=_ocr_headers(ocr_enabled))
     metadata_result = tika_parser.from_file(filepath, serverEndpoint=server, service="meta")
     content  = (content_result.get("content") or "").strip()
     metadata = metadata_result.get("metadata") or {}
@@ -212,7 +213,7 @@ def run_worker(batch_size: int = BATCH):
                             from pst_extractor import index_pst
                             index_pst(filepath, source)
                             continue
-                        content, metadata = extract(filepath)
+                        content, metadata = extract(filepath, ocr_enabled=source.ocr_enabled)
                         buffer.append(build_action(filepath, content, metadata, extension, source))
                     except Exception as e:
                         logging.error(f"Erreur [{filepath}] : {e}")

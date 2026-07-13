@@ -202,6 +202,8 @@ modifiables à chaud (même mécanisme Redis, voir `runtime_config.py`) :
 | `worker_flush_interval` | 10 (s) | ≤ 10s (relu à chaque itération du worker) |
 | `worker_batch_size` | 200 | ⚠️ Le seuil de flush bulk() est immédiat, mais `max_poll_records` (réglage bas niveau du consumer Kafka) reste fixé au démarrage — redémarrer le worker pour un effet complet |
 | `watcher_poll_interval` | 10 (s) | ≤ 5s (le watcher détecte le changement et redémarre son propre observateur automatiquement, sans redémarrer le conteneur) |
+| `ocr_languages` | `fra` | Immédiat (relu à chaque appel Tika) |
+| `ocr_strategy` | `auto` | Immédiat |
 
 ```bash
 ./manage.sh get-config
@@ -213,6 +215,50 @@ modifiables à chaud (même mécanisme Redis, voir `runtime_config.py`) :
 **Résilience** : comme pour les types de fichiers, un Redis injoignable
 fait retomber sur les valeurs des variables d'environnement (elles-mêmes
 avec un défaut) — jamais d'arrêt de service pour un problème de config.
+
+## OCR (PDF scannés et images)
+
+Les PDF scannés (sans couche texte) et les fichiers image (jpg/png/
+tiff/...) deviennent cherchables par leur contenu grâce à Tesseract OCR,
+déjà embarqué dans l'image `apache/tika:3.3.1.0-full` utilisée par les 4
+conteneurs Tika — aucun service supplémentaire, aucune dépendance
+Python ajoutée. Le pack linguistique français (`fra`) y est présent par
+défaut (`docker run --rm apache/tika:3.3.1.0-full tesseract --list-langs`
+pour vérifier sur votre installation).
+
+**Activation — par source**, pas globale : l'OCR est coûteux en CPU, une
+source composée essentiellement de documents bureautiques natifs
+(docx/xlsx déjà en texte) n'a aucune raison de l'activer, contrairement
+à une source d'archives scannées. Se fait via le panneau admin
+("Sources fichiers", case "OCR (FR)") ou directement en API :
+
+```bash
+curl -s -X POST -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
+  -d '{"ocr_enabled": true}' \
+  http://localhost:8000/admin/file-sources/finance/ocr
+```
+
+N'affecte que les documents indexés **après** l'activation — pas de
+réextraction rétroactive des documents déjà indexés (comme pour tout
+changement de configuration ; relancer `./manage.sh init <source>` pour
+réindexer l'existant).
+
+**Réglages globaux** (`ocr_languages`/`ocr_strategy`, voir tableau
+ci-dessus) : contrairement à l'activation, ces deux réglages s'appliquent
+à tout le cluster Tika, car le pack linguistique Tesseract est figé dans
+l'image Docker — une langue par source n'aurait donc pas de sens tant
+qu'une seule image sert toutes les sources. `ocr_strategy=auto` ne
+déclenche Tesseract que sur les pages sans texte extractible : mesuré
+à ~30 ms de surcoût sur un PDF déjà textuel contre plusieurs secondes
+sur un PDF réellement scanné — un bon défaut pour limiter le coût CPU,
+mais à valider empiriquement sur un échantillon réel avant un
+déploiement à large échelle si le volume de PDF scannés est important.
+
+⚠️ Sans l'en-tête `X-Tika-PDFOcrStrategy`, Tika OCRise quand même un PDF
+scanné par défaut (comportement observé sur Tika 3.3.1), mais avec une
+langue Tesseract non française qui écorche les accents — c'est pourquoi
+une source avec OCR désactivé envoie explicitement `no_ocr` plutôt que
+de ne rien envoyer (voir `indexer.py:_ocr_headers`).
 
 ## Configuration dynamique des types de fichiers
 
@@ -230,6 +276,13 @@ chaud (Redis), **sans redémarrer** `producer.py`, `worker.py` ni
 # Les formats d'archive sont couverts de la même façon :
 ./manage.sh set-filetype zip --enabled false      # désactive tout .zip
 ./manage.sh set-filetype tar.gz --max-size 200     # limite les .tar.gz à 200 Mo
+
+# Images (jpg/jpeg/png/tiff/tif/bmp) — désactivées par défaut, à activer
+# par source concernée. Pour qu'elles deviennent réellement cherchables
+# par leur contenu (pas seulement indexées avec un contenu vide), activer
+# aussi l'OCR sur cette même source (voir section "OCR" ci-dessus) :
+./manage.sh set-filetype jpg --enabled true --max-size 20 --source finance
+./manage.sh set-filetype png --enabled true --max-size 20 --source finance
 ```
 
 ⚠️ **Extensions composées** (`tar.gz`, `tar.bz2`, `tar.xz`) : la clé

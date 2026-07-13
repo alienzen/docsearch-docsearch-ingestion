@@ -25,6 +25,7 @@ from archive_extractor import (
 from filetype_config import is_allowed, get_enabled_extensions
 from path_filter import is_path_allowed, matches_pattern
 from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME, ES_SEARCH_ALIAS
+from runtime_config import get_param
 
 logging.basicConfig(
     level=logging.INFO,
@@ -176,7 +177,38 @@ def create_index(source: Source | None = None):
         es.indices.put_alias(index=source.es_index, name=ES_SEARCH_ALIAS)
 
 
-def extract_text(filepath: str) -> tuple[str, dict]:
+def _ocr_headers(ocr_enabled: bool) -> dict:
+    """
+    En-têtes Tika pour piloter l'OCR Tesseract (déjà embarqué dans
+    l'image apache/tika:*-full, y compris le pack linguistique français —
+    vérifié : `tesseract --list-langs` liste "fra" par défaut, aucune
+    image custom nécessaire).
+
+    ocr_enabled=False renvoie explicitement "no_ocr" plutôt que de ne
+    passer aucun en-tête : vérifié empiriquement que Tika OCRise déjà un
+    PDF scanné SANS aucun en-tête (comportement par défaut proche de
+    "auto"), mais avec une langue Tesseract non française qui écorche les
+    accents ("décrit" → "deécrit") — l'absence d'en-tête n'est donc PAS
+    équivalente à "pas d'OCR", il faut le désactiver explicitement pour
+    les sources qui n'en veulent pas (coût CPU).
+
+    ocr_enabled=True applique la stratégie et la langue configurées
+    globalement (runtime_config.py — un pack de langue par source
+    n'aurait pas de sens, il est figé dans l'image Tika pour tout le
+    cluster). "auto" (valeur par défaut de ocr_strategy) ne déclenche
+    Tesseract que sur les pages sans texte extractible — mesuré à ~30ms
+    de surcoût sur un PDF déjà textuel contre plusieurs secondes sur un
+    PDF réellement scanné.
+    """
+    if not ocr_enabled:
+        return {"X-Tika-PDFOcrStrategy": "no_ocr"}
+    return {
+        "X-Tika-PDFOcrStrategy": get_param("ocr_strategy"),
+        "X-Tika-OCRLanguage":    get_param("ocr_languages"),
+    }
+
+
+def extract_text(filepath: str, ocr_enabled: bool = False) -> tuple[str, dict]:
     """
     Deux appels séparés à Tika plutôt qu'un seul service="all" :
 
@@ -197,10 +229,14 @@ def extract_text(filepath: str) -> tuple[str, dict]:
     Coût : deux requêtes HTTP vers Tika au lieu d'une — accepté en
     échange de métadonnées fiables (le même bug de fusion récursive
     pouvait aussi corrompre author/date de la même façon).
+
+    `ocr_enabled` (voir _ocr_headers()) n'est appliqué qu'à l'appel
+    service="text" — l'appel service="meta" n'a rien à extraire
+    visuellement, inutile de lui faire porter ces en-têtes.
     """
     import random
     server = random.choice(TIKA_SERVERS)
-    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text")
+    content_result  = tika_parser.from_file(filepath, serverEndpoint=server, service="text", headers=_ocr_headers(ocr_enabled))
     metadata_result = tika_parser.from_file(filepath, serverEndpoint=server, service="meta")
     content  = (content_result.get("content") or "").strip()
     metadata = metadata_result.get("metadata") or {}
@@ -388,7 +424,7 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         return
 
     logging.info(f"  [INDEX] {identity}")
-    content, metadata = extract_text(str(tika_path))
+    content, metadata = extract_text(str(tika_path), ocr_enabled=source.ocr_enabled)
     folder, folder_top = compute_folder_fields(identity, source)
 
     doc = {

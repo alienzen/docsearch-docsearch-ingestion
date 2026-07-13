@@ -39,6 +39,16 @@ DEFAULT_RUNTIME = {
     "worker_batch_size":         int(os.getenv("WORKER_BATCH_SIZE", "200")),
     "worker_flush_interval":     int(os.getenv("WORKER_FLUSH_INTERVAL", "10")),
     "watcher_poll_interval":     int(os.getenv("WATCHER_POLL_INTERVAL", "10")),
+    # Réglages OCR (Tesseract via Tika, voir indexer.py:_ocr_headers) —
+    # GLOBAUX et non par source : le pack linguistique Tesseract est figé
+    # dans l'image Tika pour tout le cluster, une langue par source
+    # n'aurait donc pas de sens. L'ACTIVATION de l'OCR, elle, se fait par
+    # source (voir file_sources_config.py:Source.ocr_enabled).
+    # Type str (pas bool) : set_param() coerce via type(DEFAULT_RUNTIME[k]),
+    # et bool("false") vaut True en Python — un piège qu'on évite en
+    # gardant ces réglages en chaînes plutôt qu'en booléens.
+    "ocr_languages":              os.getenv("OCR_LANGUAGES", "fra"),
+    "ocr_strategy":               os.getenv("OCR_STRATEGY", "auto"),
 }
 
 _cache: dict = {}
