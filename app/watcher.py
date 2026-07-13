@@ -573,16 +573,16 @@ def start_watcher():
     la boucle ci-dessous fait automatiquement dès qu'elle détecte un
     changement.
     """
-    # {source_name: {"observer": PollingObserver, "folder": str}}
+    # {source_name: {"observer": PollingObserver, "handler": DocumentHandler, "folder": str}}
     active: dict[str, dict] = {}
     current_interval = get_param("watcher_poll_interval")
 
-    def _start_observer(source: Source, interval: int) -> PollingObserver:
+    def _start_observer(source: Source, interval: int) -> tuple[PollingObserver, "DocumentHandler"]:
         handler = DocumentHandler(source)
         obs = PollingObserver(timeout=interval)
         obs.schedule(handler, source.folder, recursive=True)
         obs.start()
-        return obs
+        return obs, handler
 
     def _stop_observer(name: str):
         entry = active.pop(name, None)
@@ -595,13 +595,27 @@ def start_watcher():
         """Démarre/arrête les observateurs pour coller au registre
         courant. Redémarre aussi un observateur dont le dossier a
         changé (rare : équivaut à changer subfolder via add-file-source sur
-        une source déjà active)."""
+        une source déjà active).
+
+        Un observateur déjà actif garde le MÊME DocumentHandler tant que
+        son dossier ne change pas — sans la mise à jour ci-dessous, son
+        `.source` (searchable/ocr_enabled/label/...) resterait figé à
+        l'instantané capturé lors du démarrage de l'observateur, et une
+        bascule OCR (ou tout autre réglage) faite depuis l'admin après coup
+        serait silencieusement ignorée pour cette source tant que ce
+        conteneur watcher n'est pas redémarré. Source étant un
+        @dataclass(frozen=True), `!=` compare bien tous les champs — on
+        rafraîchit juste la référence tenue par le handler, sans toucher à
+        l'observateur ni perdre d'événements en file."""
         sources = get_sources()
 
         for name in list(active):
             if name not in sources or active[name]["folder"] != sources[name].folder:
                 logging.info(f"🛑 Source retirée ou modifiée — arrêt de la surveillance : {name}")
                 _stop_observer(name)
+            elif active[name]["handler"].source != sources[name]:
+                logging.info(f"🔄 Configuration mise à jour pour la source '{name}' (OCR/label/…)")
+                active[name]["handler"].source = sources[name]
 
         for name, source in sources.items():
             if name not in active:
@@ -622,8 +636,10 @@ def start_watcher():
                 # (create ou put_mapping selon l'existant) : sans danger à
                 # rappeler ici même si l'index existe déjà.
                 create_index(source)
+                obs, handler = _start_observer(source, interval)
                 active[name] = {
-                    "observer": _start_observer(source, interval),
+                    "observer": obs,
+                    "handler":  handler,
                     "folder":   source.folder,
                 }
                 logging.info(
