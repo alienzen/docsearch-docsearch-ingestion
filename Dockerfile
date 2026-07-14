@@ -7,6 +7,10 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # ACL étendues POSIX (getfacl / setfacl)
     acl \
+    # ACL NTFS sur partages CIFS/Windows (getcifsacl / setcifsacl) —
+    # getfacl seul ne renvoie rien d'exploitable sur ce type de partage,
+    # voir acl_extractor.py:extract_windows_acl()
+    cifs-utils \
     # Binding Python pour libpff (archives PST Outlook) — le paquet
     # s'appelle python3-pypff (PAS python3-libpff, qui n'existe pas),
     # disponible directement via apt sur Debian 12, jamais publié sur
