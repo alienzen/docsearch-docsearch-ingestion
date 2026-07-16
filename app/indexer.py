@@ -11,6 +11,7 @@ CUSTOM_KEYWORDS_INDEX = os.getenv("CUSTOM_KEYWORDS_INDEX", "custom_keywords")
 import hashlib
 import logging
 import re
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -41,6 +42,25 @@ es = Elasticsearch(
     max_retries=3,
     request_timeout=60,
 )
+
+
+def wait_for_es(client: Elasticsearch = es, timeout: int = 300, interval: int = 5) -> None:
+    """Bloque jusqu'à ce qu'Elasticsearch réponde. À froid (mono-nœud,
+    VM contrainte), ES peut mettre 60-90s avant d'accepter la moindre
+    connexion — les 3 retries du client (~15s) ne suffisent pas à couvrir
+    ce délai, et le premier appel ES d'un process qui démarre trop tôt
+    lève sans ça une exception non rattrapée (boucle de redémarrage)."""
+    start = time.time()
+    while True:
+        try:
+            if client.ping():
+                return
+        except Exception:
+            pass
+        if time.time() - start > timeout:
+            raise RuntimeError(f"Elasticsearch injoignable après {timeout}s — abandon.")
+        logging.info("⏳ En attente d'Elasticsearch...")
+        time.sleep(interval)
 
 # Les extensions/tailles autorisées sont maintenant configurables à chaud
 # via filetype_config.py (Redis) — voir is_allowed() et get_enabled_extensions().

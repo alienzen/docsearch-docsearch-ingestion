@@ -19,7 +19,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields, _ocr_headers
+from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields, _ocr_headers, wait_for_es
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -117,6 +117,8 @@ def _flush(buffer: list, errors_total: int) -> int:
 
 
 def run_worker(batch_size: int = BATCH):
+    wait_for_es(es)
+
     consumer = KafkaConsumer(
         "documents-to-index",
         bootstrap_servers=KAFKA_BOOT,
