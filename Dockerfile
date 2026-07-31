@@ -1,8 +1,11 @@
 # ── docsearch-ingestion — Image Python ────────────────────────
 # Indexation initiale, workers Kafka, watcher (surveillance dossier)
 # Python 3.12 · pypff via apt (extraction PST) · ACL POSIX
+#
+# Image de base pleinement qualifiée (docker.io/library/...) : voir
+# docsearch-api/Dockerfile pour la raison (podman + machines isolées).
 
-FROM python:3.12-slim
+FROM docker.io/library/python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # ACL étendues POSIX (getfacl / setfacl)
@@ -46,8 +49,10 @@ COPY app/ .
 
 # UID configurable pour correspondre au propriétaire du volume
 # /documents monté depuis l'hôte (voir README.md)
-ARG DOCKER_UID=1000
-RUN useradd -m -u ${DOCKER_UID} appuser 2>/dev/null || useradd -m appuser && \
+# Renommé depuis DOCKER_UID avec le passage à podman ; se règle par
+# ./manage.sh build (APP_UID=... ).
+ARG APP_UID=1000
+RUN useradd -m -u ${APP_UID} appuser 2>/dev/null || useradd -m appuser && \
     chown -R appuser /app
 USER appuser
 

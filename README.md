@@ -11,7 +11,7 @@ Fait partie de l'écosystème DocSearch, découpé en plusieurs dépôts :
 | **docsearch-ingestion** (ce dépôt) | Extraction, ACL, indexation |
 | [docsearch-api](../docsearch-api) | API de recherche (FastAPI) |
 | [docsearch-ui](../docsearch-ui) | Interface web statique |
-| [docsearch-infra](../docsearch-infra) | Orchestration Docker Compose |
+| [docsearch-infra](../docsearch-infra) | Orchestration podman + systemd (Quadlet) |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
 | [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
 
@@ -113,7 +113,7 @@ lieu d'un seul processus séquentiel.
 
 ```bash
 # Depuis docsearch-infra :
-./manage.sh scale-workers 12   # 12 workers en parallèle (recommandé
+sudo ./manage.sh scale-workers 12   # 12 workers en parallèle (recommandé
                                 # pour de gros volumes en production)
 ```
 
@@ -121,7 +121,7 @@ lieu d'un seul processus séquentiel.
 workers** — sinon certains workers ne recevront jamais de messages
 (le parallélisme d'un groupe de consumers Kafka est plafonné par le
 nombre de partitions). C'est réglé via `KAFKA_NUM_PARTITIONS` dans
-`docker-compose.yml` de `docsearch-infra` (16 par défaut).
+l'unité Kafka de `docsearch-infra` (16 par défaut).
 
 Les 4 instances Tika (`tika1`-`tika4`) sont choisies aléatoirement par
 chaque worker (`random.choice(TIKA_SERVERS)`) — elles absorbent la
@@ -143,12 +143,12 @@ noire) ou, à l'inverse, être les **seuls** indexés (liste blanche) —
 modifiable à chaud, sans redémarrage (même mécanisme Redis) :
 
 ```bash
-./manage.sh exclude-path finance/confidentiel
-./manage.sh exclude-path "*/tmp"          # guillemets nécessaires (le shell ne doit pas développer le *)
-./manage.sh exclude-path "*.cache"
-./manage.sh include-path finance           # bascule en liste blanche
+sudo ./manage.sh exclude-path finance/confidentiel
+sudo ./manage.sh exclude-path "*/tmp"          # guillemets nécessaires (le shell ne doit pas développer le *)
+sudo ./manage.sh exclude-path "*.cache"
+sudo ./manage.sh include-path finance           # bascule en liste blanche
 ./manage.sh list-path-filters
-./manage.sh remove-path-filter finance/confidentiel
+sudo ./manage.sh remove-path-filter finance/confidentiel
 ```
 
 **Règles de correspondance** (voir `path_filter.py`) :
@@ -175,12 +175,12 @@ modifiable à chaud, sans redémarrage (même mécanisme Redis) :
 ⚠️ **Les documents déjà indexés dans un dossier fraîchement exclu ne
 sont pas supprimés automatiquement** — la règle ne s'applique qu'aux
 nouveaux passages (scan ou événement temps réel). Utiliser
-`./manage.sh purge-path <motif>` pour nettoyer l'existant (aperçu
+`sudo ./manage.sh purge-path <motif>` pour nettoyer l'existant (aperçu
 avant confirmation, même syntaxe glob que `exclude-path`) :
 
 ```bash
-./manage.sh exclude-path finance/confidentiel   # pour le futur
-./manage.sh purge-path finance/confidentiel     # nettoie l'existant
+sudo ./manage.sh exclude-path finance/confidentiel   # pour le futur
+sudo ./manage.sh purge-path finance/confidentiel     # nettoie l'existant
 ```
 
 `purge_path()` (dans `indexer.py`) utilise le scan/scroll ES (pas une
@@ -208,9 +208,9 @@ modifiables à chaud (même mécanisme Redis, voir `runtime_config.py`) :
 
 ```bash
 ./manage.sh get-config
-./manage.sh set-config archive_max_depth 2
-./manage.sh set-config worker_flush_interval 5
-./manage.sh set-config watcher_poll_interval 3
+sudo ./manage.sh set-config archive_max_depth 2
+sudo ./manage.sh set-config worker_flush_interval 5
+sudo ./manage.sh set-config watcher_poll_interval 3
 ```
 
 **Résilience** : comme pour les types de fichiers, un Redis injoignable
@@ -224,7 +224,7 @@ tiff/...) deviennent cherchables par leur contenu grâce à Tesseract OCR,
 déjà embarqué dans l'image `apache/tika:3.3.1.0-full` utilisée par les 4
 conteneurs Tika — aucun service supplémentaire, aucune dépendance
 Python ajoutée. Le pack linguistique français (`fra`) y est présent par
-défaut (`docker run --rm apache/tika:3.3.1.0-full tesseract --list-langs`
+défaut (`podman run --rm docker.io/apache/tika:3.3.1.0-full tesseract --list-langs`
 pour vérifier sur votre installation).
 
 **Activation — par source**, pas globale : l'OCR est coûteux en CPU, une
@@ -241,13 +241,13 @@ curl -s -X POST -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
 
 N'affecte que les documents indexés **après** l'activation — pas de
 réextraction rétroactive des documents déjà indexés (comme pour tout
-changement de configuration ; relancer `./manage.sh init <source>` pour
+changement de configuration ; relancer `sudo ./manage.sh init <source>` pour
 réindexer l'existant).
 
 **Réglages globaux** (`ocr_languages`/`ocr_strategy`, voir tableau
 ci-dessus) : contrairement à l'activation, ces deux réglages s'appliquent
 à tout le cluster Tika, car le pack linguistique Tesseract est figé dans
-l'image Docker — une langue par source n'aurait donc pas de sens tant
+l'image du conteneur — une langue par source n'aurait donc pas de sens tant
 qu'une seule image sert toutes les sources. `ocr_strategy=auto` ne
 déclenche Tesseract que sur les pages sans texte extractible : mesuré
 à ~30 ms de surcoût sur un PDF déjà textuel contre plusieurs secondes
@@ -270,20 +270,20 @@ chaud (Redis), **sans redémarrer** `producer.py`, `worker.py` ni
 ```bash
 # Depuis docsearch-infra :
 ./manage.sh get-filetypes
-./manage.sh set-filetype jpg --enabled true --max-size 5
-./manage.sh set-filetype pdf --max-size 100
-./manage.sh set-filetype docx --enabled false
+sudo ./manage.sh set-filetype jpg --enabled true --max-size 5
+sudo ./manage.sh set-filetype pdf --max-size 100
+sudo ./manage.sh set-filetype docx --enabled false
 
 # Les formats d'archive sont couverts de la même façon :
-./manage.sh set-filetype zip --enabled false      # désactive tout .zip
-./manage.sh set-filetype tar.gz --max-size 200     # limite les .tar.gz à 200 Mo
+sudo ./manage.sh set-filetype zip --enabled false      # désactive tout .zip
+sudo ./manage.sh set-filetype tar.gz --max-size 200     # limite les .tar.gz à 200 Mo
 
 # Images (jpg/jpeg/png/tiff/tif/bmp) — désactivées par défaut, à activer
 # par source concernée. Pour qu'elles deviennent réellement cherchables
 # par leur contenu (pas seulement indexées avec un contenu vide), activer
 # aussi l'OCR sur cette même source (voir section "OCR" ci-dessus) :
-./manage.sh set-filetype jpg --enabled true --max-size 20 --source finance
-./manage.sh set-filetype png --enabled true --max-size 20 --source finance
+sudo ./manage.sh set-filetype jpg --enabled true --max-size 20 --source finance
+sudo ./manage.sh set-filetype png --enabled true --max-size 20 --source finance
 ```
 
 ⚠️ **Extensions composées** (`tar.gz`, `tar.bz2`, `tar.xz`) : la clé
@@ -352,27 +352,26 @@ Si vous observez encore des réextractions complètes après cette mise
 ## Lancer en local (nécessite un ES + Kafka + Tika déjà démarrés)
 
 ```bash
-cp .env.example .env
-docker build -t docsearch-ingestion .
+podman build -t localhost/docsearch/ingestion:latest .
 
 # Indexation initiale — scan + publication Kafka (rapide, non bloquant)
-docker run --rm --env-file .env -v /chemin/documents:/documents:ro \
-  --network docsearch-infra_docsearch-net \
-  docsearch-ingestion python producer.py
+podman run --rm --env-file /etc/docsearch/docsearch.env -v /chemin/documents:/sources:ro \
+  --network docsearch-net \
+  localhost/docsearch/ingestion:latest python producer.py
 
 # Workers — plusieurs instances en parallèle pour un débit élevé
 # (le travail lourd — extraction Tika + indexation ES — se fait ici)
-docker run -d --env-file .env -v /chemin/documents:/documents:ro \
-  --network docsearch-infra_docsearch-net \
-  docsearch-ingestion python worker.py
+podman run -d --env-file /etc/docsearch/docsearch.env -v /chemin/documents:/sources:ro \
+  --network docsearch-net \
+  localhost/docsearch/ingestion:latest python worker.py
 # → lancer plusieurs conteneurs de ce type pour paralléliser
 
 # Watcher (démon) — indexation temps réel, appelle index_file()
 # directement (pas via Kafka, volume trop faible pour justifier le
 # passage par une file de messages)
-docker run -d --env-file .env -v /chemin/documents:/documents:ro \
-  --network docsearch-infra_docsearch-net \
-  docsearch-ingestion python watcher.py
+podman run -d --env-file /etc/docsearch/docsearch.env -v /chemin/documents:/sources:ro \
+  --network docsearch-net \
+  localhost/docsearch/ingestion:latest python watcher.py
 ```
 
 En pratique, ces conteneurs sont orchestrés par `docsearch-infra` — voir
@@ -465,7 +464,7 @@ comment la générer. Voir `app/sql_dsn_registry.py` pour l'implémentation
 
 ```bash
 # Depuis docsearch-infra :
-./manage.sh add-sql-source clients postgresql CLIENTS_DB_DSN \
+sudo ./manage.sh add-sql-source clients postgresql CLIENTS_DB_DSN \
   "SELECT id, nom, email FROM clients WHERE actif = true" id clients_sql \
   '[{"column":"id","es_field":"id","es_type":"keyword"},
     {"column":"nom","es_field":"nom","es_type":"text","analyzer":"french"},
@@ -473,8 +472,8 @@ comment la générer. Voir `app/sql_dsn_registry.py` pour l'implémentation
   --poll-interval 300
 
 ./manage.sh list-sql-sources
-./manage.sh run-sql-source clients      # passage manuel immédiat
-./manage.sh remove-sql-source clients   # retire du registre, ne supprime pas l'index
+sudo ./manage.sh run-sql-source clients      # passage manuel immédiat
+sudo ./manage.sh remove-sql-source clients   # retire du registre, ne supprime pas l'index
 ```
 
 ## Connecteur web (Elastic Open Web Crawler)
@@ -514,11 +513,11 @@ sans authentification) — `--private` à l'ajout de la source pour l'inverse.
 #    (output_index = le crawl_index qu'on va déclarer à l'étape 2)
 
 # 2. Depuis docsearch-infra :
-./manage.sh add-web-source cc_decisions cc_decisions_raw cc_decisions --poll-interval 3600
+sudo ./manage.sh add-web-source cc_decisions cc_decisions_raw cc_decisions --poll-interval 3600
 
 ./manage.sh list-web-sources
-./manage.sh run-web-source cc_decisions      # passage manuel immédiat (après un premier crawl)
-./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
+sudo ./manage.sh run-web-source cc_decisions      # passage manuel immédiat (après un premier crawl)
+sudo ./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
 ```
 
 ## Points d'attention

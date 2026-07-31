@@ -5,8 +5,8 @@
 1. Cloner le dépôt : `git clone <url> && cd docsearch`
 2. Copier la configuration : `cp .env.example .env`
 3. Adapter `DOCS_PATH` dans `.env` vers un dossier de documents de test
-4. Lancer le stack de dev : `chmod +x manage.sh && ./manage.sh start`
-5. Indexer un échantillon : `./manage.sh init`
+4. Lancer le stack de dev : `chmod +x manage.sh && sudo ./manage.sh start`
+5. Indexer un échantillon : `sudo ./manage.sh init`
 
 Voir `guide_install_virtualbox.docx` pour une installation pas à pas sur VM VirtualBox.
 
@@ -14,9 +14,10 @@ Voir `guide_install_virtualbox.docx` pour une installation pas à pas sur VM Vir
 
 ```
 docsearch/
-├── docker-compose.yml             # Stack complet (production)
-├── docker-compose.override.yml    # Overrides développement (auto-appliqué)
-├── .env.example                   # Modèle de configuration
+├── quadlet/                       # Unités systemd (Quadlet) — orchestration
+│   ├── common/                    # Cible, réseau, modèles de configuration
+│   ├── dev/                       # Pile complète sur une machine
+│   └── roles/                     # Déploiement 8 machines, par rôle
 ├── manage.sh                      # Script de gestion (start/stop/init/logs...)
 ├── nginx/nginx.conf               # Reverse proxy + emplacement SSO
 └── 
@@ -42,11 +43,11 @@ docsearch/
 pip install ruff
 ruff check 
 
-# Valider la syntaxe Docker Compose
-docker compose config --quiet
+# Valider les unités Quadlet (aucune erreur de génération attendue)
+/usr/libexec/podman/quadlet -dryrun
 
 # Build de l'image applicative
-docker build -t docsearch-app:test ./app
+podman build -t localhost/docsearch/ingestion:test .
 ```
 
 ## Versions de référence
@@ -90,8 +91,8 @@ sortie et gère ACL + indexation ES comme avant.
 **Vérifier que pypff est bien installé et accessible :**
 
 ```bash
-docker compose build worker
-docker compose run --rm worker /usr/bin/python3 -c "import pypff; print(pypff.get_version())"
+podman build -t localhost/docsearch/ingestion:test .
+podman run --rm localhost/docsearch/ingestion:test /usr/bin/python3 -c "import pypff; print(pypff.get_version())"
 ```
 
 Si cette commande échoue alors que `apt-get install python3-pypff`
