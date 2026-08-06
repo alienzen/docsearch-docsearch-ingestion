@@ -8,7 +8,7 @@
 4. Lancer le stack de dev : `chmod +x manage.sh && sudo ./manage.sh start`
 5. Indexer un échantillon : `sudo ./manage.sh init`
 
-Voir `guide_install_virtualbox.docx` pour une installation pas à pas sur VM VirtualBox.
+Voir `guide_install_virtualbox.md` pour une installation pas à pas sur VM VirtualBox.
 
 ## Structure du projet
 
@@ -19,14 +19,14 @@ docsearch/
 │   ├── dev/                       # Pile complète sur une machine
 │   └── roles/                     # Déploiement 8 machines, par rôle
 ├── manage.sh                      # Script de gestion (start/stop/init/logs...)
-├── nginx/nginx.conf               # Reverse proxy + emplacement SSO
+├── nginx/nginx.conf               # Reverse proxy (TLS, débit) — plus aucun rôle d'authentification
 └── 
     ├── indexer.py                 # Indexation initiale + ACL POSIX
     ├── worker.py                  # Workers Kafka parallèles
     ├── watcher.py                 # Surveillance temps réel + ACL
     ├── search_api.py              # API FastAPI + filtrage ACL
     ├── acl_extractor.py           # Extraction ACL POSIX / getfacl
-    ├── ldap_resolver.py           # Résolution groupes LDAP/AD
+    ├── auth/                      # Authentification : annuaire, jetons, sessions, SSO
     ├── pst_extractor.py           # Indexation emails PST
     └── templates/                 # Interface web (index.html, chat.html)
 ```
