@@ -16,8 +16,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cifs-utils \
     # Binding Python pour libpff (archives PST Outlook) — le paquet
     # s'appelle python3-pypff (PAS python3-libpff, qui n'existe pas),
-    # disponible directement via apt sur Debian 12, jamais publié sur
-    # PyPI. Module Python fourni : "pypff".
+    # disponible directement via apt, jamais publié sur PyPI. Module
+    # Python fourni : "pypff".
+    #
+    # ⚠️ L'image de base python:3.12-slim est passée à Debian 13
+    # (« trixie ») en amont — elle n'est plus sur Debian 12 depuis la
+    # sortie de trixie, indépendamment de la version des HÔTES. Vérifié le
+    # 2026-08-06 : python3-pypff y est toujours présent (20180714-3.1),
+    # donc rien à changer ici. À revérifier avant toute montée de version
+    # de l'image de base : ce paquet n'a pas d'équivalent PyPI, sa
+    # disparition n'aurait aucune solution de repli.
     #
     # IMPORTANT : ce paquet compile pypff contre le Python SYSTÈME
     # Debian (/usr/bin/python3), qui est un exécutable DIFFÉRENT du
