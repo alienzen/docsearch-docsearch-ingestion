@@ -147,7 +147,7 @@ sudo ./manage.sh exclude-path finance/confidentiel
 sudo ./manage.sh exclude-path "*/tmp"          # guillemets nécessaires (le shell ne doit pas développer le *)
 sudo ./manage.sh exclude-path "*.cache"
 sudo ./manage.sh include-path finance           # bascule en liste blanche
-./manage.sh list-path-filters
+sudo ./manage.sh list-path-filters
 sudo ./manage.sh remove-path-filter finance/confidentiel
 ```
 
@@ -207,7 +207,7 @@ modifiables à chaud (même mécanisme Redis, voir `runtime_config.py`) :
 | `ocr_strategy` | `auto` | Immédiat |
 
 ```bash
-./manage.sh get-config
+sudo ./manage.sh get-config
 sudo ./manage.sh set-config archive_max_depth 2
 sudo ./manage.sh set-config worker_flush_interval 5
 sudo ./manage.sh set-config watcher_poll_interval 3
@@ -269,7 +269,7 @@ chaud (Redis), **sans redémarrer** `producer.py`, `worker.py` ni
 
 ```bash
 # Depuis docsearch-infra :
-./manage.sh get-filetypes
+sudo ./manage.sh get-filetypes
 sudo ./manage.sh set-filetype jpg --enabled true --max-size 5
 sudo ./manage.sh set-filetype pdf --max-size 100
 sudo ./manage.sh set-filetype docx --enabled false
@@ -471,7 +471,7 @@ sudo ./manage.sh add-sql-source clients postgresql CLIENTS_DB_DSN \
     {"column":"email","es_field":"email","es_type":"keyword"}]' \
   --poll-interval 300
 
-./manage.sh list-sql-sources
+sudo ./manage.sh list-sql-sources
 sudo ./manage.sh run-sql-source clients      # passage manuel immédiat
 sudo ./manage.sh remove-sql-source clients   # retire du registre, ne supprime pas l'index
 ```
@@ -515,7 +515,7 @@ sans authentification) — `--private` à l'ajout de la source pour l'inverse.
 # 2. Depuis docsearch-infra :
 sudo ./manage.sh add-web-source cc_decisions cc_decisions_raw cc_decisions --poll-interval 3600
 
-./manage.sh list-web-sources
+sudo ./manage.sh list-web-sources
 sudo ./manage.sh run-web-source cc_decisions      # passage manuel immédiat (après un premier crawl)
 sudo ./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
 ```
