@@ -55,6 +55,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
+# ── Identité de la livraison ──────────────────────────────────
+# Même dispositif que docsearch-api/Dockerfile, voir son commentaire :
+# VERSION (version produit, repli de app/version.py) copié dans l'image,
+# estampille de build injectée par ./manage.sh build.
+COPY VERSION .
+
+ARG DOCSEARCH_VERSION=inconnu
+ARG DOCSEARCH_COMMIT=inconnu
+ARG DOCSEARCH_BUILD_DATE=inconnu
+ENV DOCSEARCH_VERSION=${DOCSEARCH_VERSION} \
+    DOCSEARCH_COMMIT=${DOCSEARCH_COMMIT} \
+    DOCSEARCH_BUILD_DATE=${DOCSEARCH_BUILD_DATE}
+LABEL org.opencontainers.image.title="docsearch-ingestion" \
+      org.opencontainers.image.version=${DOCSEARCH_VERSION} \
+      org.opencontainers.image.revision=${DOCSEARCH_COMMIT} \
+      org.opencontainers.image.created=${DOCSEARCH_BUILD_DATE}
+
 # UID configurable pour correspondre au propriétaire du volume
 # /documents monté depuis l'hôte (voir README.md)
 # Renommé depuis DOCKER_UID avec le passage à podman ; se règle par
