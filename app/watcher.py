@@ -28,11 +28,18 @@ from filetype_config import get_enabled_extensions
 from runtime_config import get_param
 from path_filter import is_path_allowed
 from file_sources_config import Source, get_sources
+import version
 
 # ── Battement de cœur (pour le panneau d'administration) ──────
 # Écrit l'heure du dernier cycle de surveillance dans Redis, afin que
 # docsearch-api puisse détecter un watcher figé/planté sans avoir
 # besoin d'un accès Docker (voir /admin/status côté docsearch-api).
+#
+# Le battement transporte AUSSI l'identité de l'image d'ingestion
+# (version.py) : les processus d'ingestion n'ont aucune surface HTTP, et
+# ce canal existe déjà des deux côtés — inutile d'en ouvrir un second
+# pour trois champs. Le TTL de 120 s garantit au passage que la version
+# affichée en administration est celle d'un processus vivant.
 HEARTBEAT_KEY = "docsearch:heartbeat:watcher"
 
 def _write_heartbeat():
@@ -43,7 +50,8 @@ def _write_heartbeat():
             port=int(os.getenv("REDIS_PORT", "6379")),
             socket_connect_timeout=2, socket_timeout=2,
         )
-        client.set(HEARTBEAT_KEY, json.dumps({"ts": time.time()}), ex=120)
+        battement = {"ts": time.time(), **version.infos()}
+        client.set(HEARTBEAT_KEY, json.dumps(battement), ex=120)
     except Exception as e:
         logging.debug(f"[heartbeat] Redis injoignable : {e}")
 
