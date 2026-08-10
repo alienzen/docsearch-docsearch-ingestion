@@ -10,10 +10,10 @@ Fait partie de l'écosystème DocSearch, découpé en plusieurs dépôts :
 |---|---|
 | **docsearch-ingestion** (ce dépôt) | Extraction, ACL, indexation |
 | [docsearch-api](../docsearch-api) | API de recherche (FastAPI) |
-| [docsearch-ui](../docsearch-ui) | Interface web statique |
+| [docsearch-ui-vue](../docsearch-ui-vue) | Interface web (Vue 3 + DSFR) |
 | [docsearch-infra](../docsearch-infra) | Orchestration podman + systemd (Quadlet) |
 | [docsearch-docs](../docsearch-docs) | Documents commerciaux |
-| [docsearch-dataset-generator](../docsearch-dataset-generator) | Génération de jeux de test |
+| `docsearch-dataset-generator` | Génération de jeux de test (cloné à la demande) |
 
 ## Contenu
 
