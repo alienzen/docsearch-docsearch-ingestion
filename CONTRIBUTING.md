@@ -39,15 +39,32 @@ docsearch/
 ## Avant de proposer une Pull Request
 
 ```bash
-# Linter Python
-pip install ruff
-ruff check 
+# Linter Python — même version que .github/workflows/ci.yml, sans quoi la CI
+# peut échouer sur une règle qu'aucune machine locale n'a vue passer.
+pip install ruff==0.16.2
+ruff check .
 
 # Valider les unités Quadlet (aucune erreur de génération attendue)
 /usr/libexec/podman/quadlet -dryrun
 
 # Build de l'image applicative
 podman build -t localhost/docsearch/ingestion:test .
+```
+
+Le dépôt a un `ruff.toml` depuis le 2026-08-12. Jusque-là, `ruff` tournait ici
+sans configuration, donc sur ses seules règles par défaut (E4, E7, E9, F) : ce
+fichier rend le choix explicite, ajoute `B`, `C4` et `SIM`, et argumente règle
+par règle ce qui reste écarté — notamment `E402`, parce que les modules de
+`app/` sont à plat (`COPY app/ .` dans le Dockerfile) et s'importent entre eux
+après avoir ajusté leur environnement. Le linter passe au vert sur l'état actuel
+du dépôt : un signalement est une régression, pas du bruit de fond.
+
+Il n'y a **pas de venv** dans ce dépôt — il ne tourne qu'en conteneur. Sur la VM
+de développement, le `ruff` du dépôt voisin fait l'affaire, c'est un binaire
+autonome qui n'importe pas le code analysé :
+
+```bash
+../docsearch-api/.venv/bin/ruff check .
 ```
 
 ## Versions de référence

@@ -23,7 +23,7 @@ from acl_extractor import extract_acl
 from archive_extractor import (
     is_archive, archive_kind, safe_extract_archive, ArchiveExtractionError, max_depth
 )
-from filetype_config import is_allowed, get_enabled_extensions
+from filetype_config import is_allowed
 from path_filter import is_path_allowed, matches_pattern
 from file_sources_config import Source, get_source, DEFAULT_SOURCE_NAME, ES_SEARCH_ALIAS
 from runtime_config import get_param

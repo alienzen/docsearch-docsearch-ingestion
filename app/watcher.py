@@ -21,7 +21,7 @@ from pathlib import Path
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 from elasticsearch import Elasticsearch, NotFoundError
-from acl_extractor import extract_acl, FileACL
+from acl_extractor import extract_acl
 from indexer import index_file, is_excluded, relative_to_docs_folder, create_index, wait_for_es
 from archive_extractor import is_archive
 from filetype_config import get_enabled_extensions

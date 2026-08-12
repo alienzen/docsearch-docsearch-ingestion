@@ -12,7 +12,6 @@
 #     nativement les permissions dangereuses et les liens symboliques
 #     pointant hors de la destination
 
-import os
 import logging
 import tarfile
 import zipfile
