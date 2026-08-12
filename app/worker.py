@@ -19,7 +19,7 @@ from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 from tika import parser as tika_parser
 from acl_extractor import extract_acl
-from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields, _ocr_headers, wait_for_es
+from indexer import get_author, get_title, get_keywords, apply_keyword_overrides, is_excluded, index_archive, get_date_created, get_date_modified, compute_folder_fields, content_sha256, _ocr_headers, wait_for_es
 from archive_extractor import is_archive, archive_kind
 from filetype_config import is_allowed
 from runtime_config import get_param
@@ -93,6 +93,12 @@ def build_action(filepath: str, content: str, metadata: dict, extension: str, so
             "folder_top":     folder_top,
             "size":           path.stat().st_size,
             "indexed_at":     datetime.now(timezone.utc).isoformat(),
+            "doc_hash":       doc_id,
+            # Empreinte du contenu, qui reconnaît deux copies du même
+            # fichier sous deux chemins — voir content_sha256() dans
+            # indexer.py, notamment pourquoi c'est le flux binaire et non
+            # le texte extrait qui est haché.
+            "content_sha256": content_sha256(filepath),
             "acl": {
                 "owner":       acl.owner,
                 "group":       acl.group,

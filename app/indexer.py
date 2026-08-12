@@ -73,6 +73,92 @@ SUPPORTED = {".doc", ".docx", ".ppt", ".pptx",
 # .zip, .tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .7z (si py7zr installé)
 
 
+# ── Analyse : français, et thésaurus métier ──────────────────
+#
+# Le jeu de synonymes vit dans Elasticsearch (API `_synonyms`), pas dans
+# un fichier de l'image : il se modifie depuis le panneau
+# d'administration, sans reconstruction ni redémarrage, et sans accès
+# réseau — compatible avec la production isolée.
+#
+# ⚠️ TROIS points ont été éprouvés contre le moteur (ES 9.4.3) avant
+# d'écrire ceci, et deux d'entre eux échouent EN SILENCE si on s'y prend
+# autrement :
+#
+# 1. **L'ordre des filtres.** Les synonymes doivent passer AVANT le
+#    stemmer, sinon l'expansion (« direction des ressources humaines »)
+#    n'est pas racinisée alors que le texte indexé l'a été : aucune
+#    correspondance, aucune erreur, zéro résultat.
+# 2. **`updateable: true` n'est accepté que dans un analyseur de
+#    RECHERCHE.** C'est aussi ce qu'on veut : le thésaurus se modifie
+#    alors sans réindexer les documents.
+# 3. **Un jeu de synonymes inexistant n'empêche rien** — l'index se crée,
+#    se ferme et se rouvre normalement, le filtre se comportant comme
+#    vide. (La prudence inverse figurait dans le plan d'évolutions ;
+#    l'essai l'a démentie.)
+SYNONYMES_SET = os.getenv("SYNONYMS_SET", "docsearch_fr")
+
+ANALYSE = {
+    "analyzer": {
+        "french": {
+            "tokenizer": "standard",
+            "filter": ["lowercase", "french_stop", "french_stemmer"],
+        },
+        # Employé à la recherche seulement (search_analyzer du champ
+        # `content`) : c'est ce qui permet de changer le thésaurus sans
+        # toucher aux documents déjà indexés.
+        "french_search": {
+            "tokenizer": "standard",
+            "filter": ["lowercase", "synonymes_fr", "french_stop", "french_stemmer"],
+        },
+    },
+    "filter": {
+        "french_stop":    {"type": "stop",    "stopwords": "_french_"},
+        "french_stemmer": {"type": "stemmer", "language": "light_french"},
+        "synonymes_fr": {
+            "type": "synonym_graph",
+            "synonyms_set": SYNONYMES_SET,
+            "updateable": True,
+        },
+    },
+}
+
+
+def migrer_analyse(source: Source | None = None) -> dict:
+    """Ajoute l'analyseur de recherche à un index DÉJÀ créé.
+
+    Un analyseur ne s'ajoute pas à un index ouvert : il faut le fermer,
+    écrire les réglages, puis le rouvrir. Quelques secondes
+    d'indisponibilité par index, et AUCUNE réindexation — c'est tout
+    l'intérêt d'un filtre de synonymes en analyseur de recherche.
+
+    Idempotent : rejouable sans dommage sur un index déjà migré.
+    """
+    source = _resolve_source(source)
+    index = source.es_index
+    if not es.indices.exists(index=index):
+        return {"index": index, "statut": "absent"}
+
+    es.indices.close(index=index)
+    try:
+        es.indices.put_settings(index=index, settings={"analysis": ANALYSE})
+    finally:
+        # Toujours rouvrir, même si l'écriture des réglages a échoué : un
+        # index laissé fermé est invisible à la recherche, et le symptôme
+        # (« la source a disparu ») ne dit pas d'où il vient.
+        es.indices.open(index=index)
+
+    es.indices.put_mapping(index=index, properties={
+        "content": {
+            "type": "text",
+            "analyzer": "french",
+            "search_analyzer": "french_search",
+            "search_quote_analyzer": "french",
+        }
+    })
+    logging.info(f"Analyseur de synonymes appliqué à '{index}' (source '{source.name}').")
+    return {"index": index, "statut": "migré"}
+
+
 def _resolve_source(source: Source | None) -> Source:
     """La plupart des fonctions de ce module acceptent `source=None` pour
     les points d'entrée CLI/tests mono-source : repli sur la source par
@@ -101,7 +187,19 @@ def create_index(source: Source | None = None):
                 # de filtrer/facetter une recherche fédérée sur plusieurs
                 # index sans avoir à connaître les noms d'index bruts.
                 "source":      {"type": "keyword"},
-                "content":     {"type": "text", "analyzer": "french"},
+                # Trois analyseurs, et chacun a sa raison (voir SYNONYMES
+                # plus bas, et le README) :
+                #   analyzer             — à l'indexation, sans synonymes
+                #   search_analyzer      — à la recherche, AVEC synonymes
+                #   search_quote_analyzer — recherche entre guillemets,
+                #                           sans synonymes : « terme
+                #                           exact » veut dire exact.
+                "content":     {
+                    "type": "text",
+                    "analyzer": "french",
+                    "search_analyzer": "french_search",
+                    "search_quote_analyzer": "french",
+                },
                 "title":       {"type": "text"},
                 "author":      {
                     "type": "keyword",
@@ -123,7 +221,15 @@ def create_index(source: Source | None = None):
                 "date_created":  {"type": "date"},
                 "date_modified": {"type": "date"},
                 "indexed_at":  {"type": "date"},
+                # Empreinte du CHEMIN (identité du document) — à ne pas
+                # confondre avec content_sha256 juste en dessous, qui est
+                # l'empreinte du CONTENU. Deux copies du même fichier ont
+                # deux doc_hash et un seul content_sha256.
                 "doc_hash":    {"type": "keyword"},
+                # Absent des documents SQL et web (pas de fichier), et de
+                # ceux indexés avant l'ajout de ce champ — voir
+                # scripts/backfill_hashes.py pour rattraper l'existant.
+                "content_sha256": {"type": "keyword"},
                 # ── Champs ACL ───────────────────────────
                 "acl": {
                     "properties": {
@@ -159,18 +265,7 @@ def create_index(source: Source | None = None):
         "settings": {
             "number_of_shards":   3,
             "number_of_replicas": 1,
-            "analysis": {
-                "analyzer": {
-                    "french": {
-                        "tokenizer": "standard",
-                        "filter": ["lowercase", "french_stop", "french_stemmer"]
-                    }
-                },
-                "filter": {
-                    "french_stop":    {"type": "stop",    "stopwords": "_french_"},
-                    "french_stemmer": {"type": "stemmer", "language": "light_french"},
-                }
-            }
+            "analysis": ANALYSE,
         }
     }
     if not es.indices.exists(index=source.es_index):
@@ -413,6 +508,43 @@ def file_hash(identity: str) -> str:
     return hashlib.md5(identity.encode()).hexdigest()
 
 
+# Taille des blocs de lecture pour le hachage de contenu. Le fichier est
+# de toute façon lu pour être envoyé à Tika ; ce hachage ne rajoute qu'un
+# parcours, sans jamais charger le fichier entier en mémoire.
+TAILLE_BLOC_HACHAGE = 64 * 1024
+
+
+def content_sha256(chemin) -> str | None:
+    """Empreinte du CONTENU d'un fichier — de quoi reconnaître deux
+    exemplaires du même document sous deux chemins différents.
+
+    À ne pas confondre avec `file_hash()` / `doc_hash`, qui hache le
+    CHEMIN : celui-ci identifie le document, celui-là son contenu. Les
+    deux coexistent, et le second ne remplace pas le premier — en changer
+    la sémantique casserait silencieusement tout ce qui s'y fie.
+
+    Le flux BINAIRE, et non le texte extrait : le texte dépend de la
+    version de Tika, donc une montée de version ferait bouger toutes les
+    empreintes d'un coup. Contrepartie assumée : deux fichiers au contenu
+    identique mais aux métadonnées différentes (même document
+    réenregistré) ne sont pas reconnus comme doublons. L'écrasante
+    majorité des doublons d'un partage bureautique sont des copies à
+    l'octet près (« rapport - Copie.pdf »).
+
+    Rend None si le fichier a disparu ou n'est pas lisible : une
+    empreinte manquante ne doit jamais empêcher l'indexation du document.
+    """
+    try:
+        empreinte = hashlib.sha256()
+        with open(chemin, "rb") as fichier:
+            while bloc := fichier.read(TAILLE_BLOC_HACHAGE):
+                empreinte.update(bloc)
+        return empreinte.hexdigest()
+    except OSError as e:
+        logging.debug(f"  [HASH] Illisible, empreinte omise ({chemin}) : {e}")
+        return None
+
+
 def is_excluded(filename: str) -> bool:
     """
     Fichiers à ignorer systématiquement : fichiers temporaires ou verrous
@@ -464,6 +596,10 @@ def _index_document(tika_path: Path, identity: str, filename: str,
         "size":       size,
         "indexed_at": datetime.now(timezone.utc).isoformat(),
         "doc_hash":   doc_id,
+        # `tika_path` et non `identity` : pour un membre d'archive, c'est
+        # le fichier réellement extrait qu'il faut hacher, pas l'identité
+        # « archive.zip::membre » qui ne désigne aucun fichier sur disque.
+        "content_sha256": content_sha256(tika_path),
         "acl": {
             "owner":       acl.owner,
             "group":       acl.group,

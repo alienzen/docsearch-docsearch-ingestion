@@ -520,6 +520,92 @@ sudo ./manage.sh run-web-source cc_decisions      # passage manuel immédiat (ap
 sudo ./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
 ```
 
+## Empreinte de contenu et doublons
+
+Chaque document fichier porte un `content_sha256` — l'empreinte de son
+**contenu**, à ne pas confondre avec `doc_hash`, qui hache son **chemin**.
+Deux copies du même fichier ont deux `doc_hash` et un seul
+`content_sha256` : c'est ce qui permet enfin de mesurer les doublons
+(panneau « Doublons » de l'administration).
+
+C'est le **flux binaire** qui est haché, pas le texte extrait : le texte
+dépend de la version de Tika, et une montée de version ferait bouger
+toutes les empreintes d'un coup. Contrepartie assumée : deux fichiers au
+contenu identique mais aux métadonnées différentes (même document
+réenregistré) ne sont pas reconnus comme doublons — l'écrasante majorité
+des doublons d'un partage bureautique sont des copies à l'octet près.
+
+Le coût est négligeable : le fichier est de toute façon lu pour être
+envoyé à Tika, le hachage n'ajoute qu'un parcours par blocs de 64 kio,
+sans jamais charger le fichier en mémoire. Un fichier illisible n'a pas
+d'empreinte plutôt qu'une empreinte vide — sans quoi tous les fichiers
+disparus se retrouveraient doublons les uns des autres.
+
+**Sources SQL et web** : pas de fichier, donc pas d'empreinte. Le champ
+est absent, et le rapport ne les compte pas dans les documents mesurés.
+
+**Documents déjà indexés** : ils n'ont pas d'empreinte tant que le
+rattrapage n'a pas tourné. Un rescan n'y changerait rien, `worker.py`
+sautant tout document déjà présent.
+
+```bash
+sudo ./manage.sh backfill-hashes            # simulation, toutes les sources
+sudo ./manage.sh backfill-hashes finance --apply
+```
+
+Il relit les fichiers sur disque **sans appeler Tika** (entrée/sortie
+pure), ne touche que les documents dépourvus du champ — donc reprend
+naturellement après une interruption — et ignore les membres d'archive,
+dont le `filepath` (`archive.zip::note.pdf`) ne désigne aucun fichier
+réel ; leur empreinte se remplira à la prochaine réindexation de
+l'archive.
+
+## Thésaurus (synonymes de recherche)
+
+L'index de documents porte trois analyseurs pour le champ `content`, et
+chacun a sa raison :
+
+| Rôle | Analyseur | Synonymes |
+|---|---|---|
+| Indexation | `french` | non |
+| Recherche | `french_search` | **oui** |
+| Recherche entre guillemets | `french` (`search_quote_analyzer`) | non |
+
+Le jeu de synonymes vit dans Elasticsearch (API `_synonyms`), pas dans un
+fichier de l'image : il se modifie depuis le panneau d'administration, à
+chaud, sans reconstruction ni redémarrage — et sans accès réseau, ce que
+la production isolée exige.
+
+⚠️ **Trois propriétés éprouvées contre le moteur (ES 9.4.3) avant
+d'écrire ce code, dont deux échouent EN SILENCE si on s'y prend
+autrement** :
+
+1. **Le filtre de synonymes doit passer AVANT le stemmer.** Sinon
+   l'expansion (« direction des ressources humaines ») n'est pas
+   racinisée alors que le texte indexé l'a été : aucune correspondance,
+   aucune erreur, zéro résultat.
+2. **`updateable: true` n'est accepté que dans un analyseur de
+   recherche.** C'est aussi ce qu'on veut : le thésaurus se modifie sans
+   réindexer les 4 000 000 de documents.
+3. **Un jeu de synonymes inexistant n'empêche rien** : l'index se crée,
+   se ferme et se rouvre normalement, le filtre se comportant comme vide.
+   En revanche, Elasticsearch **refuse de supprimer un jeu référencé par
+   un index** — retirer la dernière règle écrit donc un jeu vide plutôt
+   que de supprimer le jeu.
+
+**Installations déjà en service** : un analyseur ne s'ajoute pas à un
+index ouvert. La migration ferme l'index, écrit les réglages, le rouvre,
+puis bascule le champ — quelques secondes d'indisponibilité par index,
+**aucune réindexation** :
+
+```bash
+sudo ./manage.sh migrer-synonymes           # toutes les sources
+sudo ./manage.sh migrer-synonymes finance
+```
+
+Idempotente, rejouable sans dommage. Les index créés après cette version
+l'embarquent d'emblée.
+
 ## Points d'attention
 
 - **doc_id harmonisé** : `indexer.py`, `worker.py` et `watcher.py` doivent
