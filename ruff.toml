@@ -48,8 +48,4 @@ ignore = [
     # Plusieurs instructions sur une ligne : mêmes tables de correspondance
     # alignées que dans docsearch-api. 9 signalements, aucun défaut.
     "E701",
-
-    # `raise ... ` dans un `except` sans `from err`. 1 occurrence, gardée
-    # cohérente avec docsearch-api où la règle attend un lot à part.
-    "B904",
 ]
