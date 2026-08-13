@@ -201,6 +201,9 @@ def _validate_fields(fields: list[dict], id_column: str) -> list[dict]:
         raise ValueError("Le mapping 'fields' ne peut pas être vide.")
 
     columns = set()
+    # es_field -> (colonne, type) déjà rencontrés, pour refuser deux
+    # mappages vers le même champ ES (voir plus bas).
+    champs_es: dict[str, tuple[str, str]] = {}
     for f in fields:
         if "column" not in f or "es_field" not in f or "es_type" not in f:
             raise ValueError(
@@ -215,6 +218,28 @@ def _validate_fields(fields: list[dict], id_column: str) -> list[dict]:
             raise ValueError(
                 f"'analyzer' n'a de sens que pour es_type='text' (colonne '{f['column']}')"
             )
+        # Un champ ES mappé deux fois est ambigu de bout en bout, et la
+        # contradiction ne se voit nulle part : _build_mapping() construit
+        # aussi bien le mapping (properties[f.es_field] = ...) que le
+        # document ({f.es_field: ... for f in source.fields}) par
+        # écrasement successif, donc le DERNIER mappage gagne — mais
+        # seulement à la création de l'index, ES refusant ensuite de
+        # changer le type d'un champ existant. Le type déclaré et le type
+        # réel divergent alors en silence, et c'est docsearch-api qui
+        # paie : une facette déclarée sur le mappage perdant y pose une
+        # agrégation impossible (voir _verifier_shards() dans
+        # search_api.py — recherche fédérée à zéro résultat le
+        # 2026-08-13).
+        if f["es_field"] in champs_es:
+            colonne_precedente, type_precedent = champs_es[f["es_field"]]
+            raise ValueError(
+                f"Le champ Elasticsearch '{f['es_field']}' est mappé deux fois : "
+                f"colonne '{colonne_precedente}' en '{type_precedent}', puis colonne "
+                f"'{f['column']}' en '{f['es_type']}'. Un champ ES ne peut avoir qu'un "
+                f"seul type et qu'une seule source de valeur — gardez le mappage utile "
+                f"et supprimez l'autre."
+            )
+        champs_es[f["es_field"]] = (f["column"], f["es_type"])
         columns.add(f["column"])
 
     if id_column not in columns:
