@@ -154,7 +154,11 @@ def _extract_7z(archive_path: Path, dest: Path) -> list[Path]:
             raise ArchiveExtractionError(
                 f"{len(names)} fichiers dans l'archive (limite {max_files})"
             )
-        z.extractall(path=dest)
+        # noqa S202 : la règle vise tarfile.extractall(), qu'elle
+        # reconnaît à son nom seul. Ici l'objet est un py7zr.SevenZipFile,
+        # pas une archive tar — et le vrai chemin tarfile, plus haut dans
+        # ce fichier, extrait membre par membre avec filter="data".
+        z.extractall(path=dest)  # noqa: S202
 
     extracted = [p for p in dest.rglob("*") if p.is_file()]
     total_size = sum(p.stat().st_size for p in extracted)

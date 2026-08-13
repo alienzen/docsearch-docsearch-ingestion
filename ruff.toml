@@ -28,11 +28,29 @@ target-version = "py312"
 #   B    bugbear — pièges réels (mutable par défaut, zip non strict…)
 #   C4   comprehensions inutiles
 #   SIM  simplifications sûres
+#   S    bandit — défauts de sécurité (ajouté le 2026-08-13)
 #
 # E501 (ligne trop longue) reste dehors : 127 signalements pour un 95e
 # centile réel à 80 caractères. `line-length` ci-dessus est la cible si on
 # l'active un jour.
-select = ["E4", "E7", "E9", "F", "B", "C4", "SIM"]
+#
+# ── Sur le `S` ──────────────────────────────────────────────
+# Ajouté en même temps que dans docsearch-api, et pour la même raison : il
+# couvre ce pour quoi on installerait un analyseur dédié — mot de passe en
+# dur, requête SQL construite par concaténation (S608, la règle « pas de
+# f-string SQL » de ~/.claude/CLAUDE.md, vérifiée pour de bon),
+# désérialisation pickle, tarfile non filtré, subprocess avec shell=True.
+# Ce dépôt lit des fichiers venus du dehors et appelle des binaires
+# système : c'est celui des deux où la règle a le plus à dire.
+#
+# Ce qu'il ne fait PAS : l'analyse de flux. ruff voit une construction
+# dangereuse là où elle est écrite, pas une donnée qui chemine jusqu'à
+# elle.
+#
+# État au 2026-08-13 : 24 signalements, tous examinés, aucun défaut réel.
+# Chacun est écarté soit par un `ignore` motivé ci-dessous, soit par un
+# `noqa` commenté sur place — jamais en silence.
+select = ["E4", "E7", "E9", "F", "B", "C4", "SIM", "S"]
 
 ignore = [
     # try/except/pass → contextlib.suppress. Préférence de style, pas un
@@ -48,4 +66,41 @@ ignore = [
     # Plusieurs instructions sur une ligne : mêmes tables de correspondance
     # alignées que dans docsearch-api. 9 signalements, aucun défaut.
     "E701",
+
+    # ── Règles S écartées ────────────────────────────────────
+    # try/except/pass sans journalisation. Même construction que SIM105
+    # ci-dessus, donc même arbitrage. Les 4 occurrences sont des boucles
+    # d'attente (Elasticsearch pas encore démarré, Tika pas encore prêt) :
+    # l'échec unitaire est le cas NORMAL, c'est l'expiration du délai qui
+    # lève.
+    "S110",
+
+    # Appels subprocess, et binaires appelés par leur nom court plutôt que
+    # par un chemin absolu. Trois appels, tous en liste littérale et sans
+    # shell — forme dans laquelle aucune injection n'est possible :
+    # acl_extractor.py (getfacl, smbcacls) et pst_extractor.py (readpst).
+    # Aucun n'interpole d'entrée dans le NOM de la commande, et le PATH
+    # est celui que le Containerfile a construit ; coder /usr/bin/... en
+    # dur casserait au premier changement d'image de base pour zéro gain.
+    "S603",
+    "S607",
+
+    # MD5. 12 occurrences, toutes des IDENTITÉS de document — le hash du
+    # chemin normalisé sert d'_id Elasticsearch (indexer.py:file_id,
+    # watcher.py:file_hash) et de clé de déduplication. Jamais un mot de
+    # passe, jamais une signature : rien ici ne dépend de la résistance
+    # aux collisions face à un attaquant.
+    #
+    # Pour rendre cette intention explicite plutôt que de l'écarter ici,
+    # la forme exacte est `hashlib.md5(x, usedforsecurity=False)` : même
+    # empreinte, donc aucun réindexage du corpus, et la règle se tait
+    # d'elle-même. 12 lignes à toucher dans du code que la CI ne teste
+    # pas encore — d'où le report.
+    "S324",
+
+    # random.choice() non cryptographique : répartition de charge entre
+    # les serveurs Tika (indexer.py, worker.py). Un tirage prévisible n'a
+    # aucune conséquence — au pire, un serveur Tika reçoit plus de
+    # travail que l'autre.
+    "S311",
 ]
