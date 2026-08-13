@@ -38,6 +38,17 @@ from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 from file_sources_config import ES_SEARCH_ALIAS
 from web_sources_config import WebSource
 
+# Recopié d'indexer.py (ANALYSE / CHAMP_EXACT) plutôt qu'importé, comme
+# l'analyseur `french` juste en dessous : importer indexer.py ferait
+# entrer Tika et l'extraction d'archives dans un worker web qui n'en a
+# aucun usage. Toute évolution de la recherche exacte doit donc être
+# répercutée ICI, dans sql_indexer.py et dans field_sets() côté API.
+ANALYSEUR_EXACT = {
+    "tokenizer": "standard",
+    "filter": ["lowercase", "asciifolding"],
+}
+CHAMP_EXACT = {"type": "text", "analyzer": "exact"}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [WebIndexer] %(message)s"
@@ -67,16 +78,23 @@ def _build_mapping() -> dict:
     return {
         "mappings": {
             "properties": {
-                "filename":    {"type": "keyword"},
+                "filename":    {
+                    "type": "keyword",
+                    "fields": {"exact": CHAMP_EXACT},
+                },
                 "filepath":    {
                     "type": "keyword",
-                    "fields": {"text": {"type": "text"}},
+                    "fields": {"text": {"type": "text"}, "exact": CHAMP_EXACT},
                 },
                 "extension":     {"type": "keyword"},
                 "type":          {"type": "keyword"},
                 "source":        {"type": "keyword"},
-                "content":       {"type": "text", "analyzer": "french"},
-                "title":         {"type": "text"},
+                "content":       {
+                    "type": "text",
+                    "analyzer": "french",
+                    "fields": {"exact": CHAMP_EXACT},
+                },
+                "title":         {"type": "text", "fields": {"exact": CHAMP_EXACT}},
                 "date_modified": {"type": "date"},
                 "indexed_at":    {"type": "date"},
                 "acl": {
@@ -94,7 +112,8 @@ def _build_mapping() -> dict:
                     "french": {
                         "tokenizer": "standard",
                         "filter": ["lowercase", "french_stop", "french_stemmer"]
-                    }
+                    },
+                    "exact": ANALYSEUR_EXACT,
                 },
                 "filter": {
                     "french_stop":    {"type": "stop",    "stopwords": "_french_"},

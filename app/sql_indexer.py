@@ -32,6 +32,17 @@ from elasticsearch.helpers import scan as es_scan, bulk as es_bulk
 
 from file_sources_config import ES_SEARCH_ALIAS
 from sql_sources_config import SqlSource
+
+# Recopié d'indexer.py (ANALYSE / CHAMP_EXACT) plutôt qu'importé, comme
+# l'analyseur `french` de _build_mapping : importer indexer.py ferait
+# entrer Tika et l'extraction d'archives dans un worker SQL qui n'en a
+# aucun usage. Toute évolution de la recherche exacte doit donc être
+# répercutée ICI, dans web_indexer.py et dans field_sets() côté API.
+ANALYSEUR_EXACT = {
+    "tokenizer": "standard",
+    "filter": ["lowercase", "asciifolding"],
+}
+CHAMP_EXACT = {"type": "text", "analyzer": "exact"}
 import sql_dsn_registry
 
 logging.basicConfig(
@@ -132,6 +143,16 @@ def _build_mapping(source: SqlSource) -> dict:
         prop = {"type": f.es_type}
         if f.es_type == "text" and f.analyzer:
             prop["analyzer"] = f.analyzer
+        # Sous-champ de recherche exacte sur tout champ interrogeable en
+        # texte libre. Posé sur TOUS les champs `text` de la source et
+        # non sur une liste fixe de noms : le mapping d'une source SQL
+        # est déclaré par sa configuration, donc le champ qui porte le
+        # texte peut s'appeler autrement que `content` (voir
+        # sql_sources_config.py). Un champ `keyword` n'en reçoit pas —
+        # il n'est pas tokenisé, la recherche exacte n'y aurait rien à
+        # analyser.
+        if f.es_type == "text":
+            prop["fields"] = {"exact": CHAMP_EXACT}
         properties[f.es_field] = prop
 
     # Champs automatiques, communs à toutes les sources SQL — mêmes noms
@@ -155,7 +176,8 @@ def _build_mapping(source: SqlSource) -> dict:
                     "french": {
                         "tokenizer": "standard",
                         "filter": ["lowercase", "french_stop", "french_stemmer"]
-                    }
+                    },
+                    "exact": ANALYSEUR_EXACT,
                 },
                 "filter": {
                     "french_stop":    {"type": "stop",    "stopwords": "_french_"},

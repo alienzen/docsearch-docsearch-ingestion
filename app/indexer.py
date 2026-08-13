@@ -110,6 +110,30 @@ ANALYSE = {
             "tokenizer": "standard",
             "filter": ["lowercase", "synonymes_fr", "french_stop", "french_stemmer"],
         },
+        # Recherche exacte — voir les sous-champs `.exact` du mapping.
+        # Employé À L'INDEXATION ET À LA RECHERCHE, volontairement le même
+        # des deux côtés : toute dissymétrie ici rendrait littéralement
+        # introuvable ce que l'utilisateur a tapé, ce qui est le contraire
+        # de ce que « exact » promet.
+        #
+        # La liste de filtres est courte, et chaque ABSENCE y compte
+        # autant que ce qui s'y trouve :
+        #   - pas de `french_stemmer` — « délégations » ne doit PAS
+        #     répondre à « délégation » : c'est tout l'intérêt ;
+        #   - pas de `french_stop` — sinon « le conseil » et « conseil »
+        #     deviendraient la même requête, et une expression bâtie sur
+        #     des mots outils (« état de l'art ») serait vidée de sa
+        #     substance avant même d'être cherchée ;
+        #   - pas de `synonymes_fr` — un thésaurus qui élargit une
+        #     recherche exacte la rend inexacte ; c'est déjà la règle
+        #     retenue pour les guillemets (search_quote_analyzer).
+        # Restent `lowercase` et `asciifolding`, qui sont exactement les
+        # deux tolérances demandées : « Congrès », « congres » et
+        # « CONGRES » sont une seule et même requête.
+        "exact": {
+            "tokenizer": "standard",
+            "filter": ["lowercase", "asciifolding"],
+        },
     },
     "filter": {
         "french_stop":    {"type": "stop",    "stopwords": "_french_"},
@@ -121,6 +145,14 @@ ANALYSE = {
         },
     },
 }
+
+# Sous-champ à greffer sur chaque champ interrogé en texte libre. Défini
+# une fois : ces sous-champs doivent être identiques dans les trois
+# familles d'index (fichiers ici, SQL et web dans sql_indexer.py /
+# web_indexer.py), sans quoi la recherche exacte serait silencieusement
+# aveugle aux sources concernées — un `multi_match` sur un champ absent
+# du mapping ne lève pas d'erreur, il ne matche simplement rien.
+CHAMP_EXACT = {"type": "text", "analyzer": "exact"}
 
 
 def migrer_analyse(source: Source | None = None) -> dict:
@@ -159,6 +191,144 @@ def migrer_analyse(source: Source | None = None) -> dict:
     return {"index": index, "statut": "migré"}
 
 
+# Champs `keyword` que field_sets() interroge en texte libre via un
+# sous-champ analysé (voir le mapping de create_index). Les autres champs
+# keyword de l'index — extension, doc_hash, acl.owner, source... — sont
+# des critères de filtre exact, jamais du texte cherché : leur greffer un
+# sous-champ de recherche exacte gonflerait l'index sans rien apporter.
+CHAMPS_KEYWORD_CHERCHES = {"filename", "filepath", "author", "keywords"}
+
+
+def sous_champs_exact(properties: dict) -> dict:
+    """Sous-champs `.exact` à ajouter à un mapping EXISTANT, déduits de ce
+    mapping lui-même.
+
+    Déduits et non écrits en dur, parce que cette fonction sert les trois
+    familles d'index (fichiers, SQL, web) et que celle des sources SQL
+    n'a pas de noms de champs fixes : ils sont déclarés par la
+    configuration de chaque source (voir sql_sources_config.py). Une
+    liste littérale y raterait le champ qui porte le texte dès qu'il ne
+    s'appelle pas `content`.
+
+    Ne retourne QUE les champs auxquels il manque le sous-champ, ce qui
+    rend la migration idempotente et son résultat lisible : un
+    dictionnaire vide veut dire « cet index était déjà à jour ».
+    """
+    ajouts = {}
+    for nom, prop in properties.items():
+        # Un champ objet (`acl`) porte des `properties` mais pas de
+        # `type` : rien à chercher en texte libre dedans, il tombe donc
+        # de lui-même hors des deux cas ci-dessous.
+        type_es = prop.get("type")
+        cherche_en_texte_libre = type_es == "text" or (
+            type_es == "keyword" and nom in CHAMPS_KEYWORD_CHERCHES
+        )
+        if not cherche_en_texte_libre or "exact" in prop.get("fields", {}):
+            continue
+        # Le champ est REDÉCLARÉ tel qu'il est, sous-champs déjà en place
+        # compris, avec `exact` en plus. Deux raisons de tout recopier
+        # plutôt que de n'énumérer que ce qu'on croit utile :
+        #   - `put_mapping` remplace le bloc `fields` entier, donc omettre
+        #     `author.text` le SUPPRIMERAIT, et avec lui la recherche
+        #     partielle sur les auteurs ;
+        #   - les autres paramètres (analyseurs du champ `content`,
+        #     `ignore_above` d'un keyword, ceux qu'une source SQL déclare
+        #     elle-même…) doivent être renvoyés à l'identique : ES refuse
+        #     qu'on modifie un paramètre non modifiable, mais accepte
+        #     qu'on le répète tel quel.
+        ajouts[nom] = {
+            **{cle: valeur for cle, valeur in prop.items() if cle != "fields"},
+            "fields": {**prop.get("fields", {}), "exact": CHAMP_EXACT},
+        }
+    return ajouts
+
+
+def migrer_exact(index: str, appliquer: bool = False) -> dict:
+    """Ouvre la recherche exacte sur un index DÉJÀ peuplé.
+
+    Trois opérations, dont seule la dernière coûte cher :
+
+    1. l'analyseur `exact` est ajouté aux réglages — index fermé puis
+       rouvert, comme migrer_analyse() (quelques secondes) ;
+    2. les sous-champs `.exact` sont ajoutés au mapping — additif,
+       instantané, sans effet sur les données déjà là ;
+    3. les documents déjà indexés sont RÉÉCRITS SUR PLACE
+       (`_update_by_query`), sans quoi leurs sous-champs `.exact`
+       resteraient vides et la recherche exacte ne trouverait que les
+       documents arrivés après la migration — un silence bien pire qu'une
+       erreur, puisqu'il ressemble à « ce mot n'existe pas ».
+
+    L'étape 3 relit et réanalyse chaque document depuis son `_source`
+    déjà stocké dans ES : ni disque, ni Tika, ni réextraction. C'est
+    malgré tout la seule étape proportionnelle à la taille du corpus,
+    d'où la simulation par défaut (`appliquer=False`), comme
+    backfill_hashes.py.
+
+    Idempotent : les étapes 1 et 2 sont sans effet sur un index déjà
+    migré, et rejouer l'étape 3 réécrit les mêmes valeurs.
+    """
+    if not es.indices.exists(index=index):
+        return {"index": index, "statut": "absent"}
+
+    # Première (et unique) valeur plutôt qu'un accès par `[index]` : la
+    # réponse est indexée sur le nom d'index RÉSOLU, qui diffère du nom
+    # demandé dès qu'on passe un alias.
+    mappings = next(iter(es.indices.get_mapping(index=index).values()))
+    ajouts = sous_champs_exact(mappings["mappings"].get("properties", {}))
+    nb_docs = es.count(index=index)["count"]
+
+    if not appliquer:
+        return {
+            "index":       index,
+            "statut":      "simulation",
+            "champs":      sorted(ajouts),
+            "documents":   nb_docs,
+        }
+
+    es.indices.close(index=index)
+    try:
+        # Le seul analyseur `exact`, et non ANALYSE en entier : les
+        # réglages d'analyse se fusionnent clé à clé, donc ceux déjà en
+        # place sont conservés. Y verser ANALYSE poserait au passage le
+        # filtre de synonymes sur les index SQL et web, qui n'en veulent
+        # pas, et se heurterait à leur définition propre de `french` si
+        # elle venait à diverger de celle d'ici.
+        es.indices.put_settings(index=index, settings={
+            "analysis": {"analyzer": {"exact": ANALYSE["analyzer"]["exact"]}}
+        })
+    finally:
+        # Toujours rouvrir, même si l'écriture des réglages a échoué —
+        # voir migrer_analyse() pour pourquoi un index laissé fermé est
+        # le pire des états.
+        es.indices.open(index=index)
+
+    if ajouts:
+        es.indices.put_mapping(index=index, properties=ajouts)
+
+    # conflicts="proceed" : l'indexation continue de tourner pendant la
+    # migration, et un document réécrit entre-temps ferait autrement
+    # échouer TOUT le lot. Le document en conflit porte déjà sa nouvelle
+    # version, donc ses sous-champs `.exact` — le sauter est correct.
+    #
+    # wait_for_completion=False : la requête rend la main tout de suite en
+    # renvoyant un identifiant de tâche ES. Sur un corpus conséquent,
+    # attendre bloquerait l'appel HTTP jusqu'au timeout du client, et
+    # l'opérateur conclurait à un échec alors que la réécriture tourne
+    # toujours côté serveur.
+    tache = es.update_by_query(index=index, conflicts="proceed", wait_for_completion=False)
+    logging.info(
+        f"Recherche exacte : mapping posé sur '{index}', "
+        f"réécriture de {nb_docs} document(s) lancée (tâche {tache['task']})."
+    )
+    return {
+        "index":     index,
+        "statut":    "migré",
+        "champs":    sorted(ajouts),
+        "documents": nb_docs,
+        "tache":     tache["task"],
+    }
+
+
 def _resolve_source(source: Source | None) -> Source:
     """La plupart des fonctions de ce module acceptent `source=None` pour
     les points d'entrée CLI/tests mono-source : repli sur la source par
@@ -171,7 +341,14 @@ def create_index(source: Source | None = None):
     mapping = {
         "mappings": {
             "properties": {
-                "filename":    {"type": "keyword"},
+                "filename":    {
+                    "type": "keyword",
+                    # `filename` est interrogé en texte libre par
+                    # field_sets() alors qu'il est en keyword : sans
+                    # sous-champ analysé, la recherche exacte n'y
+                    # matcherait que le nom de fichier ENTIER.
+                    "fields": {"exact": CHAMP_EXACT},
+                },
                 "filepath":    {
                     "type": "keyword",
                     # Même principe que author.text : filepath reste en
@@ -179,7 +356,7 @@ def create_index(source: Source | None = None):
                     # et l'affichage exact), filepath.text devient
                     # cherchable en texte libre (ex: "rapport" trouve
                     # /documents/Finance/rapport_2023.pdf).
-                    "fields": {"text": {"type": "text"}},
+                    "fields": {"text": {"type": "text"}, "exact": CHAMP_EXACT},
                 },
                 "extension":   {"type": "keyword"},
                 "type":        {"type": "keyword"},
@@ -199,15 +376,25 @@ def create_index(source: Source | None = None):
                     "analyzer": "french",
                     "search_analyzer": "french_search",
                     "search_quote_analyzer": "french",
+                    # Quatrième analyse du même texte, pour la recherche
+                    # exacte : ni racinisée, ni élargie aux synonymes.
+                    # Un sous-champ et non un quatrième `*_analyzer` du
+                    # champ lui-même — ES n'expose que les trois
+                    # ci-dessus, et surtout les deux analyses doivent
+                    # COEXISTER : la recherche ordinaire continue
+                    # d'interroger `content`, l'exacte `content.exact`.
+                    "fields": {"exact": CHAMP_EXACT},
                 },
-                "title":       {"type": "text"},
+                "title":       {"type": "text", "fields": {"exact": CHAMP_EXACT}},
                 "author":      {
                     "type": "keyword",
                     # Sous-champ analysé — permet une recherche en texte
                     # libre partielle ("Dupont" trouve "Martin Dupont"),
                     # tout en gardant "author" en keyword pour le filtre
                     # exact utilisé par les facettes/chips de l'interface.
-                    "fields": {"text": {"type": "text"}},
+                    # `exact` est frère de `text`, pas son enfant : ES
+                    # refuse un sous-champ de sous-champ.
+                    "fields": {"text": {"type": "text"}, "exact": CHAMP_EXACT},
                 },
                 # Mots-clés du document (propriété "Keywords"/"Mots-clés"
                 # des métadonnées Office/PDF, voir get_keywords()) — même
@@ -215,7 +402,7 @@ def create_index(source: Source | None = None):
                 # exact, sous-champ .text pour la recherche libre partielle.
                 "keywords":    {
                     "type": "keyword",
-                    "fields": {"text": {"type": "text"}},
+                    "fields": {"text": {"type": "text"}, "exact": CHAMP_EXACT},
                 },
                 "size":        {"type": "long"},
                 "date_created":  {"type": "date"},
