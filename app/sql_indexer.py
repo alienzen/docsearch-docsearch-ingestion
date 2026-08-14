@@ -164,7 +164,21 @@ def _build_mapping(source: SqlSource) -> dict:
     properties.setdefault("indexed_at", {"type": "date"})
 
     return {
-        "mappings": {"properties": properties},
+        # "dynamic": "strict" — un champ absent du mapping fait ÉCHOUER
+        # l'indexation du document au lieu d'être inventé par ES. Sans
+        # ça, une colonne ajoutée à une source déjà indexée se fait
+        # mapper dynamiquement en `text` (+ sous-champ `.keyword`), et
+        # le contrôle de facette de sql_sources_config.py — qui valide
+        # le type DÉCLARÉ — laisse alors passer une facette sur un champ
+        # réellement `text` : agrégation `terms` sans doc_values, shard
+        # en échec, recherche fédérée refusée par _verifier_shards().
+        # Constaté le 2026-08-14 sur agents_sql (champ monchamp3).
+        # Aucun risque pour l'indexation normale : create_index() est
+        # appelé au début de CHAQUE passage (run_source), donc tout
+        # champ déclaré est présent dans le mapping avant le bulk, et un
+        # document SQL ne porte rien d'autre que les champs déclarés +
+        # source/indexed_at.
+        "mappings": {"dynamic": "strict", "properties": properties},
         "settings": {
             "number_of_shards":   1,
             "number_of_replicas": 1,
@@ -189,9 +203,48 @@ def _build_mapping(source: SqlSource) -> dict:
 
 
 def create_index(source: SqlSource):
+    mapping = _build_mapping(source)
     if not es.indices.exists(index=source.es_index):
-        es.indices.create(index=source.es_index, body=_build_mapping(source))
+        es.indices.create(index=source.es_index, body=mapping)
         logging.info(f"Index '{source.es_index}' créé (source SQL '{source.name}').")
+    else:
+        # Index déjà existant : on applique quand même les `properties`
+        # via put_mapping — même raisonnement que indexer.py pour les
+        # sources fichiers. L'ajout d'un champ absent est une opération
+        # additive (pas de réindexation, aucune donnée touchée), ce qui
+        # rend create_index() auto-réparatrice pour toute COLONNE
+        # AJOUTÉE à une source déjà indexée. Sans ce put_mapping, le
+        # nouveau champ n'était jamais déclaré et ES le mappait
+        # dynamiquement en `text` (voir "dynamic": "strict" plus haut).
+        #
+        # Ce que put_mapping ne peut PAS faire : changer le type d'un
+        # champ DÉJÀ mappé — ES refuse la requête entière, y compris les
+        # autres champs qu'elle porte. Le seul remède est de recréer
+        # l'index (une source SQL est intégralement reconstruite au
+        # passage suivant, donc sans perte) ou de basculer l'alias vers
+        # un nouvel es_index.
+        #
+        # D'où le log plutôt que la remontée d'exception : create_index()
+        # ouvre chaque passage, et laisser lever arrêterait TOUTE
+        # indexation de la source — y compris pour un champ divergent
+        # inoffensif — jusqu'à intervention. Le message nomme le champ
+        # fautif (ES le précise) et l'erreur reste visible côté
+        # recherche, que _verifier_shards() refuse plutôt que de rendre
+        # un compte partiel.
+        try:
+            es.indices.put_mapping(
+                index=source.es_index,
+                properties=mapping["mappings"]["properties"],
+                dynamic=mapping["mappings"]["dynamic"],
+            )
+        except Exception as e:
+            logging.error(
+                f"[{source.name}] Mapping de l'index '{source.es_index}' non mis à jour : {e} — "
+                f"un champ déjà mappé ne peut pas changer de type. Tant que la divergence dure, "
+                f"le type réel dans l'index l'emporte sur le type déclaré par la source (une "
+                f"facette déclarée sur un champ réellement 'text' fera échouer la recherche). "
+                f"Recréez l'index (il sera repeuplé au passage suivant) ou visez un nouvel es_index."
+            )
 
     # Rejoint l'alias fédéré — même principe que les sources fichiers :
     # docsearch-api peut chercher sur cet index sans configuration
