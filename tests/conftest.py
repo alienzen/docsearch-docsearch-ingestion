@@ -52,6 +52,45 @@ requires_es = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def index_de_test_allege(monkeypatch):
+    """Crée les index JETABLES sans réplique et sans attendre l'allocation.
+
+    Deux réglages, deux raisons, et les deux ont coûté cher le 2026-08-15 :
+
+    - `wait_for_active_shards=0` — au-dessus du *high watermark* de disque
+      (95 % sur cette VM), Elasticsearch n'alloue plus aucun shard neuf.
+      `indices.create` reste alors bloqué en lecture socket, sans erreur
+      ni délai d'attente : la suite paraît figée, et seul `faulthandler`
+      montre où. Avec ce réglage, la création rend la main tout de suite
+      et le test échoue franchement à l'écriture suivante — un échec
+      lisible plutôt qu'un blocage.
+    - `number_of_replicas: 0` — un seul nœud sur la VM de dev. Une
+      réplique par index de test, c'est un shard `UNASSIGNED` de plus sur
+      un cluster partagé, donc du bruit dans son état de santé.
+
+    Volontairement AUTOUSE et borné au préfixe des index de test : une
+    fixture qu'il faut penser à demander ne protège que les tests dont
+    l'auteur y a pensé, et jamais un index réel ne doit passer par ici.
+
+    ⚠️  La production garde `number_of_replicas: 1`
+    (`plugin_indexer._build_mapping`), comme les trois autres indexeurs.
+    Ce n'est pas ce mapping-là qu'on corrige ici.
+    """
+    creation_reelle = plugin_indexer.es.indices.create
+
+    def creation_allegee(*, index, body=None, **options):
+        if index.startswith(PREFIXE_INDEX_TEST) and body:
+            body = {
+                **body,
+                "settings": {**body.get("settings", {}), "number_of_replicas": 0},
+            }
+            options.setdefault("wait_for_active_shards", 0)
+        return creation_reelle(index=index, body=body, **options)
+
+    monkeypatch.setattr(plugin_indexer.es.indices, "create", creation_allegee)
+
+
 @pytest.fixture
 def index_jetable():
     """Nom d'index unique, supprimé après le test — y compris son
