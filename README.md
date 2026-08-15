@@ -520,6 +520,97 @@ sudo ./manage.sh run-web-source cc_decisions      # passage manuel immédiat (ap
 sudo ./manage.sh remove-web-source cc_decisions   # retire du registre, ne supprime pas les index
 ```
 
+## Connecteur de modules complémentaires (plugins)
+
+Quatrième type de source, et le seul qui n'aille rien **chercher** : un
+module complémentaire tiers pousse des documents **déjà extraits** sur le
+topic Kafka `documents-ready`, et `plugin_worker.py` les indexe après
+validation. Voir [PLAN-PLUGINS.md](../docsearch-infra/PLAN-PLUGINS.md).
+
+```
+module (image tierce, son unité, son rythme)
+   └─→ Kafka  documents-ready
+          └─→ plugin_worker.py    valide enveloppe, source, émetteur
+                 └─→ plugin_indexer.py   mapping, ACL, alias, écriture ES
+```
+
+**Le module ne parle jamais à Elasticsearch.** Il n'a ni l'URL du cluster
+ni de compte : `plugin_indexer.py` est le seul endroit du produit qui
+écrit ses documents. C'est ce qui rend tenable l'invariant « rien ne
+contourne l'ACL » — tout passe par un point unique.
+
+### Ce que le module ne décide pas
+
+| Décision | Qui la prend |
+|---|---|
+| index de destination | le registre (`es_index`) |
+| nom de la source | le registre — un nom absent fait rejeter le message |
+| droit d'écrire sur cette source | le registre (`plugin`), comparé à l'émetteur |
+| ACL des documents | la politique déclarée par l'administrateur |
+| `indexed_at`, `type`, `source`, `doc_id` | le cœur |
+
+Trois politiques d'ACL, et une seule règle qui vaut pour les trois :
+**`acl.public` proposé par un module est toujours ignoré** — c'est le seul
+champ dont l'acceptation naïve ouvrirait tout le corpus.
+
+| Politique | Effet |
+|---|---|
+| `public` | tous les documents de la source sont publics |
+| `groupes` | ACL fixe, posée par l'administrateur (`--groupes`) |
+| `fournie` | le module fournit `users`/`groups` par document, filtrés contre la liste blanche `--principaux` (obligatoire : une liste vide est refusée, elle se lirait comme « aucune restriction ») |
+
+### Suppression : la passe et son `run_id`
+
+Les connecteurs SQL et web relisent leur source en entier et réconcilient
+par différence d'identifiants. Ici le cœur ne peut pas savoir ce que le
+module n'a **pas** envoyé : chaque document porte donc le `run_id` de la
+passe qui l'a produit, et le message `run_end` supprime tout ce qui porte
+un autre `run_id`.
+
+⚠️ Même garde-fou que les deux autres connecteurs : la réconciliation
+**refuse** de supprimer plus de la moitié d'un index d'au moins 20
+documents. Un module qui tombe au milieu de sa passe a poussé une
+fraction de ses documents ; sans ce contrôle, son `run_end` viderait la
+source, et la panne se lirait comme une source vide plutôt que comme un
+module en échec.
+
+### Format des messages
+
+```json
+{"contract_version": "0.2.0", "plugin": "jira", "source": "tickets",
+ "run_id": "2026-08-15T09:00:00Z-3f2a", "type": "document",
+ "document": {"id": "T-1", "title": "…", "content": "…",
+              "url": "https://…", "keywords": ["a"],
+              "acl": {"groups": ["DL-SUPPORT"]},
+              "extra": {"bureau": "Paris"}}}
+```
+
+`type` vaut `document`, `delete` (avec `doc_id`) ou `run_end`. Le schéma
+et sa validation vivent dans le contrat partagé
+(`app/docsearch_contract/documents.py`, copie générée — voir
+`docsearch-infra/contract/README.md`). Le topic est auto-créé par Kafka
+avec `KAFKA_NUM_PARTITIONS` partitions, comme `documents-to-index`.
+
+⚠️ Un message refusé est **journalisé et sauté**, jamais relevé en
+exception : un module fautif ne doit pas pouvoir bloquer l'indexation des
+autres. Le journal nomme toujours le module, la source et la raison —
+c'est le seul endroit où l'auteur du module verra ce qui cloche.
+
+### Utilisation
+
+```bash
+# Depuis docsearch-infra :
+sudo ./manage.sh add-plugin-source tickets jira tickets_jira groupes \
+     --groupes DL-SUPPORT --label Tickets \
+     --fields '[{"nom":"bureau","es_type":"keyword","facet":true}]'
+
+sudo ./manage.sh list-plugin-sources
+sudo ./manage.sh remove-plugin-source tickets   # retire du registre, ne supprime pas l'index
+```
+
+Le worker prend en compte une source ajoutée ou retirée sans
+redémarrage (cache de 10 s), comme les autres registres.
+
 ## Empreinte de contenu et doublons
 
 Chaque document fichier porte un `content_sha256` — l'empreinte de son

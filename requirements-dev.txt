@@ -1,0 +1,8 @@
+# ── docsearch-ingestion — dépendances de développement ───────
+# Ce dépôt n'avait pas de tests avant le connecteur de modules
+# complémentaires (lot 1) : sa CI ne faisait que `ruff` et un
+# `docker build`. Les tests arrivent avec le seul chemin d'indexation qui
+# accepte des documents venus de l'EXTÉRIEUR du produit — celui où une
+# règle d'ACL mal appliquée ne se rattrape pas.
+
+pytest==8.3.4

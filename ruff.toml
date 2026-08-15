@@ -104,3 +104,15 @@ ignore = [
     # travail que l'autre.
     "S311",
 ]
+
+[lint.per-file-ignores]
+# `assert` dans un test : bandit (S101) le signale parce que `python -O`
+# le supprime, ce qui viderait un contrôle de sécurité écrit en
+# production. Dans un test, l'assertion EST le test. Même arbitrage que
+# docsearch-api/ruff.toml, arrivé ici avec les premiers tests du dépôt
+# (connecteur de modules complémentaires) et l'extension du `ruff check`
+# de la CI à tests/.
+#
+# B011 (`assert False`) pour la même raison, à l'envers : c'est une façon
+# normale de forcer l'échec d'un test.
+"tests/**" = ["B011", "S101"]

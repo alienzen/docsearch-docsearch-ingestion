@@ -14,11 +14,60 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install ruff==0.16.2
-      - run: ruff check app/ --output-format=github
+      # tests/ en plus de app/ depuis l'arrivée des tests (lot 1) — même
+      # portée que la CI de docsearch-api.
+      - run: ruff check app/ tests/ --output-format=github
+
+  test:
+    runs-on: ubuntu-latest
+    # Elasticsearch RÉEL. Ce dépôt n'avait pas de tests avant le
+    # connecteur de modules complémentaires : ce qu'ils éprouvent — le
+    # mapping strict, le rattachement à l'alias fédéré, la réconciliation
+    # par run_id — sont des comportements du moteur, que des doublures ne
+    # prouveraient pas (principe 1 de tests/conftest.py).
+    #
+    # Pas de Redis : les tests remplacent le REGISTRE de sources, qui est
+    # l'entrée des fonctions testées, jamais leur logique.
+    services:
+      # Même version que la VM de dev et que la production (voir
+      # docsearch-infra/quadlet/dev/docsearch-es01.container).
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:9.4.3
+        ports: ["9200:9200"]
+        env:
+          discovery.type: single-node
+          # HTTP en clair : les tests parlent à http://127.0.0.1:9200. La
+          # sécurité est active par défaut depuis la 8.x, et la laisser
+          # imposerait mot de passe et certificat pour un cluster jetable.
+          xpack.security.enabled: "false"
+          # Le runner GitHub est à vm.max_map_count=65530, très en dessous
+          # des 262144 attendus par le stockage mmap — et une `services:`
+          # démarre avant le premier `run:`, donc avant tout sysctl.
+          node.store.allow_mmap: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+    env:
+      ES_HOST: http://127.0.0.1:9200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # Seulement ce dont les tests ont besoin : elasticsearch pour
+      # écrire, kafka-python-ng parce que plugin_worker l'importe, redis
+      # parce que le registre l'importe (sans jamais s'y connecter ici).
+      # Installer requirements.txt en entier tirerait Tika, py7zr,
+      # SQLAlchemy et les pilotes SQL pour rien.
+      - run: pip install -r requirements-dev.txt elasticsearch==9.4.1 kafka-python-ng==2.2.3 redis==5.2.0
+      - run: python -m pytest
 
   build:
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t docsearch-ingestion:ci .
