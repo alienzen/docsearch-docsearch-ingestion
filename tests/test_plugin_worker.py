@@ -214,3 +214,85 @@ def test_source_retiree_pendant_l_attente_abandonne_le_lot(registre, fabrique_so
 
     assert (indexes, erreurs) == (0, 0)
     assert "retirée du registre" in caplog.text
+
+
+# ── La boucle à vide (correctif du 2026-08-15) ───────────────
+#
+# `for message in consumer` bloquait indéfiniment sur un topic vide, et
+# tout le corps de boucle avec elle. Constaté sur la pile de dev : unité
+# « active » depuis des heures, aucun battement de cœur écrit, et un
+# tampon qui n'était jamais vidé sur délai. Ces trois tests éprouvent la
+# boucle SANS message — le cas qui avait échappé.
+
+class ConsommateurFactice:
+    """Doublure de KafkaConsumer : rend les lots qu'on lui donne, puis
+    interrompt la boucle comme le ferait un Ctrl-C."""
+
+    def __init__(self, lots=(), tours_a_vide=2):
+        self._lots = list(lots)
+        self._tours_a_vide = tours_a_vide
+        self.appels_poll = 0
+        self.ferme = False
+
+    def poll(self, timeout_ms=None):
+        self.appels_poll += 1
+        if self._lots:
+            return self._lots.pop(0)
+        self._tours_a_vide -= 1
+        if self._tours_a_vide < 0:
+            raise KeyboardInterrupt
+        return {}
+
+    def close(self):
+        self.ferme = True
+
+
+def test_le_battement_de_coeur_est_ecrit_sans_aucun_message(monkeypatch):
+    """LE défaut corrigé : sans message, le panneau d'administration
+    déclarait mort un worker en parfaite santé."""
+    battements = []
+    monkeypatch.setattr(plugin_worker, "_write_heartbeat", lambda: battements.append(1))
+
+    plugin_worker.run_plugin_worker(consumer=ConsommateurFactice())
+
+    assert battements, "aucun battement écrit alors que la boucle a tourné à vide"
+
+
+def test_le_tampon_est_vide_sur_delai_sans_nouveau_message(monkeypatch):
+    """Un module qui pousse puis se tait ne doit pas voir ses documents
+    rester en mémoire : sans ça, un module qui oublie son `run_end` les
+    perdait en silence.
+
+    Le vidage est observé PENDANT la boucle, pas à l'arrêt — l'arrêt vide
+    lui aussi le tampon, et s'en contenter aurait laissé passer le défaut
+    exactement comme la première version.
+
+    Elasticsearch n'intervient pas : ce qui est éprouvé est le
+    DÉCLENCHEMENT du vidage, pas l'écriture, qui a ses propres tests.
+    """
+    monkeypatch.setattr(plugin_worker, "PLUGIN_FLUSH_INTERVAL", 0)
+    monkeypatch.setattr(plugin_worker, "_write_heartbeat", lambda: None)
+
+    consommateur = ConsommateurFactice(lots=[{"p0": [type("M", (), {"value": {}})()]}])
+    vidages = []
+
+    def vider_espion(self, source_name=None):
+        vidages.append(consommateur.appels_poll)
+        return 0, 0
+
+    monkeypatch.setattr(plugin_worker.Tampon, "vider", vider_espion)
+    monkeypatch.setattr(plugin_worker, "traiter_message", lambda brut, tampon: None)
+
+    plugin_worker.run_plugin_worker(consumer=consommateur)
+
+    # Au moins un vidage AVANT le dernier poll, celui qui interrompt.
+    assert any(n < consommateur.appels_poll for n in vidages), (
+        f"vidages observés aux polls {vidages}, interruption au poll "
+        f"{consommateur.appels_poll} — le tampon n'a été vidé qu'à l'arrêt"
+    )
+
+
+def test_le_consommateur_est_ferme_a_l_arret():
+    consommateur = ConsommateurFactice()
+    plugin_worker.run_plugin_worker(consumer=consommateur)
+    assert consommateur.ferme
