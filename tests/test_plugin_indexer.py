@@ -189,3 +189,16 @@ def test_acl_ecrite_dans_es_selon_la_politique(fabrique_source, politique, atten
     es.indices.refresh(index=source.es_index)
 
     assert es.get(index=source.es_index, id=doc_id)["_source"]["acl"] == attendu
+
+
+def test_les_index_de_test_naissent_sans_replique(fabrique_source):
+    """Garde-fou de la fixture `index_de_test_allege` (conftest.py), pas du
+    code de production : un seul nœud sur la VM de dev, donc une réplique
+    par index de test est un shard UNASSIGNED de plus sur un cluster
+    partagé. La production, elle, garde bien `number_of_replicas: 1`."""
+    source = fabrique_source()
+    plugin_indexer.create_index(source)
+
+    reglages = next(iter(es.indices.get_settings(index=source.es_index).values()))
+    assert reglages["settings"]["index"]["number_of_replicas"] == "0"
+    assert plugin_indexer._build_mapping(source)["settings"]["number_of_replicas"] == 1
