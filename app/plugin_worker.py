@@ -160,8 +160,15 @@ def traiter_message(brut, tampon: Tampon) -> None:
         plugin_indexer.reconcilier(source, message["run_id"])
 
 
-def run_plugin_worker():
-    consumer = KafkaConsumer(
+def run_plugin_worker(consumer=None):
+    """Boucle de consommation.
+
+    `consumer` n'est passé que par les tests : ils fournissent une
+    doublure dont poll() rend des lots choisis, ce qui permet d'éprouver
+    ce que fait la boucle À VIDE — le cas qui a justement échappé à la
+    première version.
+    """
+    consumer = consumer or KafkaConsumer(
         PLUGIN_TOPIC,
         bootstrap_servers=KAFKA_BOOTSTRAP,
         group_id="plugin-workers",
@@ -181,15 +188,37 @@ def run_plugin_worker():
     dernier_heartbeat = 0.0
 
     try:
-        for message in consumer:
-            try:
-                traiter_message(message.value, tampon)
-            except Exception as e:
-                # Filet de sécurité : traiter_message() ne doit pas lever,
-                # mais une panne d'ES ou de Redis peut remonter d'ailleurs.
-                # Le worker continue — sinon un module fautif ou un incident
-                # passager arrêterait l'indexation de tous les autres.
-                logging.error(f"Erreur non prévue sur un message : {e}")
+        while True:
+            # poll() et NON `for message in consumer` : l'itération bloque
+            # indéfiniment quand le topic est vide, et tout le corps de
+            # boucle avec elle. Deux conséquences, constatées sur la pile
+            # de dev le 2026-08-15 — le worker tournait depuis des heures
+            # sans avoir exécuté une seule fois ce qui suit :
+            #
+            #   - aucun battement de cœur n'était écrit, donc le panneau
+            #     d'administration déclarait mort un worker en bonne
+            #     santé, aussi longtemps qu'aucun module ne poussait ;
+            #   - le vidage du tampon SUR DÉLAI ne se déclenchait jamais.
+            #     Un module qui pousse trois documents puis se tait les
+            #     laissait en mémoire jusqu'au message suivant — et un
+            #     module qui oublie son `run_end` les perdait en silence,
+            #     exactement la panne que ce lot cherche à rendre
+            #     impossible.
+            #
+            # Le délai d'attente vaut l'intervalle de vidage : à vide, la
+            # boucle tourne à ce rythme et rien de plus.
+            lots = consumer.poll(timeout_ms=int(PLUGIN_FLUSH_INTERVAL * 1000))
+            for messages in lots.values():
+                for message in messages:
+                    try:
+                        traiter_message(message.value, tampon)
+                    except Exception as e:
+                        # Filet de sécurité : traiter_message() ne doit pas
+                        # lever, mais une panne d'ES ou de Redis peut
+                        # remonter d'ailleurs. Le worker continue — sinon un
+                        # module fautif ou un incident passager arrêterait
+                        # l'indexation de tous les autres.
+                        logging.error(f"Erreur non prévue sur un message : {e}")
 
             maintenant = time.time()
             if tampon.taille >= PLUGIN_BATCH_SIZE or (maintenant - dernier_flush) >= PLUGIN_FLUSH_INTERVAL:
